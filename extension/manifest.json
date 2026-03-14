@@ -1,0 +1,23 @@
+{
+  "manifest_version": 3,
+  "name": "CanvasBuddy",
+  "version": "0.0.0",
+  "description": "AI study assistant for Canvas",
+  "action": {
+    "default_popup": "index.html",
+    "default_icon": {
+      "16": "favicon.svg",
+      "48": "favicon.svg",
+      "128": "favicon.svg"
+    }
+  },
+  "icons": {
+    "16": "favicon.svg",
+    "48": "favicon.svg",
+    "128": "favicon.svg"
+  },
+  "permissions": ["storage", "alarms"],
+  "host_permissions": [
+    "https://*.utoronto.ca/*"
+  ]
+}
