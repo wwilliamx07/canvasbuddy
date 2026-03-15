@@ -13,7 +13,6 @@ interface ChatUIProps {
   messages: Message[];
   onSendMessage: (content: string) => void;
   isLoading?: boolean;
-  onNewChat?: () => void;
 }
 
 // Function to strip tool calls from message content for display
@@ -22,7 +21,7 @@ function stripToolCalls(content: string): string {
   return content.replace(/<tool_call\s+[^>]*>/g, '').trim();
 }
 
-export const ChatUI: React.FC<ChatUIProps> = ({ messages, onSendMessage, isLoading = false, onNewChat }) => {
+export const ChatUI: React.FC<ChatUIProps> = ({ messages, onSendMessage, isLoading = false }) => {
   const [inputValue, setInputValue] = useState('');
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
@@ -56,10 +55,10 @@ export const ChatUI: React.FC<ChatUIProps> = ({ messages, onSendMessage, isLoadi
           messages.map((message) => (
             <div
               key={message.id}
-              className={`flex ${message.role === 'user' ? 'justify-end' : 'justify-start'}`}
+              className={`flex ${message.role === 'user' ? 'justify-end' : 'justify-start'} animate-fade-in`}
             >
               <div
-                className={`max-w-md px-4 py-2 rounded-lg ${
+                className={`max-w-md px-4 py-2 rounded-lg transition-all duration-300 ${
                   message.role === 'user'
                     ? 'bg-blue-500 text-white rounded-br-none'
                     : 'bg-white text-gray-900 border border-gray-200 rounded-bl-none shadow-sm'

@@ -2,13 +2,8 @@ import { useState, useEffect } from 'react';
 import { Navigation } from './components/Navigation/Navigation';
 import { ChatUI } from './components/ChatUI/ChatUI';
 import type { Message } from './components/ChatUI/ChatUI';
-import { Notes } from './components/Notes/Notes';
-import type { Note } from './components/Notes/Notes';
-import { Flashcards } from './components/Flashcards/Flashcards';
-import type { Flashcard } from './components/Flashcards/Flashcards';
 import { Settings, type AppSettings } from './components/Settings/Settings';
 import './App.css';
-import { Trash2, Plus } from 'lucide-react';
 
 // Types for chat persistence
 interface ConversationMessage {
@@ -40,6 +35,7 @@ AVAILABLE TOOLS:
 9. <tool name="get_module_items" course_id="ID" module_id="ID"> - Get items within a specific module
 10. <tool name="get_file_metadata" file_id="ID"> - Get file metadata (name, type, download URL)
 11. <tool name="get_file_public_url" file_id="ID"> - Get a direct download URL for a file
+12. <tool name="extract_text_from_file" file_id="ID"> - Extract text from PDF or PPTX files
 
 TOOL USAGE SYNTAX:
 When you need to call a tool, use this exact syntax in your response:
@@ -48,6 +44,8 @@ When you need to call a tool, use this exact syntax in your response:
 For example:
 <tool_call name="get_courses">
 <tool_call name="get_course_assignments" course_id="123">
+
+Note that course_id and file_id parameters must first be retrieved by calling get_courses or get_course_modules respectively.
 
 You can include tool calls alongside regular text in your responses. Tools will be executed and results provided to you in the next response.
 Always use tool calls to gather relevant information before providing answers to the user. If a tool call doesn't work, do not try again, instead
@@ -177,6 +175,34 @@ const toolFunctions: Record<string, (args: Record<string, string>) => Promise<st
       return JSON.stringify({ error: (error as Error).message });
     }
   },
+  extract_text_from_file: async (args) => {
+    try {
+      // First, get the public URL of the file
+      const urlResponse = await fetch(`https://q.utoronto.ca/api/v1/files/${args.file_id}/public_url`, {
+        credentials: 'include',
+      });
+      const urlData = await urlResponse.json();
+      const fileUrl = urlData.url;
+
+      if (!fileUrl) {
+        return JSON.stringify({ error: 'Unable to get file URL' });
+      }
+
+      // POST the file URL to the text extraction endpoint
+      const extractResponse = await fetch('https://api.example.com/extract-text', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ url: fileUrl }),
+      });
+
+      const extractedData = await extractResponse.json();
+      return JSON.stringify(extractedData);
+    } catch (error) {
+      return JSON.stringify({ error: (error as Error).message });
+    }
+  },
 };
 
 // Parse tool calls from response
@@ -202,16 +228,18 @@ function parseToolCalls(content: string): Array<{ name: string; args: Record<str
   return toolCalls;
 }
 
+// Clean up temporary tool results from history before saving (they're only needed during API calls)
+function cleanupToolResults(history: ConversationMessage[]): ConversationMessage[] {
+  return history.filter(msg => !(msg.role === 'user' && msg.content.startsWith('Tool results:')));
+}
+
 function App() {
-  const [activeTab, setActiveTab] = useState<'chat' | 'notes' | 'flashcards' | 'settings'>('chat');
+  const [activeTab, setActiveTab] = useState<'chat' | 'settings'>('chat');
   const [chats, setChats] = useState<Chat[]>([]);
   const [currentChatId, setCurrentChatId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]); // Display messages only
   const [conversationHistory, setConversationHistory] = useState<ConversationMessage[]>([]); // Internal history for API
-  const [notes, setNotes] = useState<Note[]>([]);
-  const [flashcards, setFlashcards] = useState<Flashcard[]>([]);
   const [isLoading, setIsLoading] = useState(false);
-  const [showChatSidebar, setShowChatSidebar] = useState(true);
   const [settings, setSettings] = useState<AppSettings>({
     apiKey: 'test',
     baseUrl: 'https://vjioo4r1vyvcozuj.us-east-2.aws.endpoints.huggingface.cloud/v1',
@@ -358,25 +386,39 @@ function App() {
     const updatedMessages = [...messages, newMessage];
     setMessages(updatedMessages);
 
-    // Build the internal conversation history (what gets sent to the model)
-    let internalHistory: ConversationMessage[] = [
-      { role: 'system', content: SYSTEM_PROMPT },
-      ...updatedMessages.map((msg) => ({
-        role: msg.role as 'user' | 'assistant',
-        content: typeof msg.content === 'string' ? msg.content : '',
-      })),
-    ];
-
-    // Add existing tool results from conversationHistory if any
-    const existingToolResults = conversationHistory.filter(msg => 
-      msg.role === 'user' && msg.content.startsWith('Tool results:')
-    );
-    if (existingToolResults.length > 0) {
-      internalHistory = internalHistory.concat(existingToolResults);
+    // Keep track of display messages and history locally throughout the async flow
+    let displayMessages = updatedMessages;
+    
+    // Build internal history: use existing conversationHistory as base, filter out tool results,
+    // then append the new user message to maintain proper order
+    let internalHistory: ConversationMessage[] = [];
+    
+    // Add system prompt if not already in conversationHistory
+    if (!conversationHistory || conversationHistory.length === 0 || conversationHistory[0]?.role !== 'system') {
+      internalHistory.push({ role: 'system', content: SYSTEM_PROMPT });
     }
+    
+    // Add all previous messages except tool results (tool results are temporary for API calls only)
+    if (conversationHistory && conversationHistory.length > 0) {
+      for (const msg of conversationHistory) {
+        if (msg.role === 'system') {
+          // Skip old system prompt if we already added ours
+          if (conversationHistory[0].role !== 'system' || conversationHistory[0].content !== SYSTEM_PROMPT) {
+            internalHistory.push(msg);
+          }
+        } else if (!(msg.role === 'user' && msg.content.startsWith('Tool results:'))) {
+          // Add all messages except tool results
+          internalHistory.push(msg);
+        }
+      }
+    }
+    
+    // Append the new user message
+    internalHistory.push({ role: 'user', content });
 
-    setConversationHistory(internalHistory);
-    saveCurrentChat(updatedMessages, internalHistory);
+    const cleanHistory = cleanupToolResults(internalHistory);
+    setConversationHistory(cleanHistory);
+    saveCurrentChat(updatedMessages, cleanHistory);
     setIsLoading(true);
 
     try {
@@ -416,10 +458,8 @@ function App() {
             timestamp: new Date(),
           };
 
-          setMessages((prev) => {
-            const updated = [...prev, assistantMessage];
-            return updated;
-          });
+          displayMessages = [...displayMessages, assistantMessage];
+          setMessages(displayMessages);
 
           // Add to internal history
           internalHistory.push({
@@ -434,16 +474,10 @@ function App() {
         if (toolCalls.length === 0) {
           // No tool calls, exit loop
           continueLoop = false;
-          // Update both display and history in state
-          const finalMessages = [...messages, ...(assistantContent ? [{
-            id: (Date.now() + Math.random()).toString(),
-            role: 'assistant' as const,
-            content: assistantContent,
-            timestamp: new Date(),
-          }] : [])];
-          setMessages(finalMessages);
-          setConversationHistory(internalHistory);
-          saveCurrentChat(finalMessages, internalHistory);
+          // Save final state (clean up temporary tool results)
+          const cleanHistory = cleanupToolResults(internalHistory);
+          setConversationHistory(cleanHistory);
+          saveCurrentChat(displayMessages, cleanHistory);
         } else {
           // Execute each tool and collect results (internally only, not displayed)
           const toolResultsText = [];
@@ -474,7 +508,7 @@ function App() {
 
           // Update states with current progress
           setConversationHistory(internalHistory);
-          saveCurrentChat(messages, internalHistory);
+          saveCurrentChat(displayMessages, cleanupToolResults(internalHistory));
         }
       }
     } catch (error) {
@@ -487,184 +521,34 @@ function App() {
         timestamp: new Date(),
       };
 
-      setMessages((prev) => {
-        const updated = [...prev, errorResponse];
-        setConversationHistory([...internalHistory, { role: 'assistant', content: errorResponse.content }]);
-        saveCurrentChat(updated, [...internalHistory, { role: 'assistant', content: errorResponse.content }]);
-        return updated;
-      });
+      displayMessages = [...displayMessages, errorResponse];
+      setMessages(displayMessages);
+      const errorHistory = cleanupToolResults([...internalHistory, { role: 'assistant', content: errorResponse.content }]);
+      setConversationHistory(errorHistory);
+      saveCurrentChat(displayMessages, errorHistory);
     } finally {
       setIsLoading(false);
     }
   };
 
-  // Notes handlers
-  const handleAddNote = (title: string, content: string) => {
-    const newNote: Note = {
-      id: Date.now().toString(),
-      title,
-      content,
-      createdAt: new Date(),
-      updatedAt: new Date(),
-    };
-    setNotes([...notes, newNote]);
-  };
-
-  const handleDeleteNote = (id: string) => {
-    setNotes(notes.filter((note) => note.id !== id));
-  };
-
-  const handleUpdateNote = (id: string, title: string, content: string) => {
-    setNotes(
-      notes.map((note) =>
-        note.id === id
-          ? {
-              ...note,
-              title,
-              content,
-              updatedAt: new Date(),
-            }
-          : note
-      )
-    );
-  };
-
-  // Flashcard handlers
-  const handleAddFlashcard = (front: string, back: string) => {
-    const newFlashcard: Flashcard = {
-      id: Date.now().toString(),
-      front,
-      back,
-      createdAt: new Date(),
-      reviewCount: 0,
-    };
-    setFlashcards([...flashcards, newFlashcard]);
-  };
-
-  const handleDeleteFlashcard = (id: string) => {
-    setFlashcards(flashcards.filter((card) => card.id !== id));
-  };
-
-  const handleReviewFlashcard = (id: string) => {
-    setFlashcards(
-      flashcards.map((card) =>
-        card.id === id
-          ? {
-              ...card,
-              reviewCount: card.reviewCount + 1,
-              lastReviewedAt: new Date(),
-            }
-          : card
-      )
-    );
-  };
-
   return (
     <div className="flex h-full w-full bg-gray-900">
-      <Navigation activeTab={activeTab} onTabChange={setActiveTab} />
+      <Navigation
+        activeTab={activeTab}
+        onTabChange={setActiveTab}
+        chats={chats}
+        currentChatId={currentChatId}
+        onSelectChat={switchChat}
+        onNewChat={createNewChat}
+        onDeleteChat={deleteChat}
+      />
 
       <main className="flex-1 flex flex-col overflow-hidden h-full">
         {activeTab === 'chat' && (
-          <div className="flex h-full">
-            <ChatUI
-              messages={messages}
-              onSendMessage={handleSendMessage}
-              isLoading={isLoading}
-              onNewChat={createNewChat}
-            />
-
-            {/* Chat Sidebar */}
-            <div
-              className={`transition-all duration-300 overflow-hidden ${
-                showChatSidebar ? 'w-64 border-l border-gray-700' : 'w-0'
-              }`}
-            >
-              <div className="h-full flex flex-col bg-gray-800">
-                <div className="p-4 border-b border-gray-700 flex items-center justify-between">
-                  <h3 className="text-white font-semibold">Chats</h3>
-                  <button
-                    onClick={() => setShowChatSidebar(false)}
-                    className="text-gray-400 hover:text-white transition-colors"
-                  >
-                    ×
-                  </button>
-                </div>
-
-                <div className="flex-1 overflow-y-auto">
-                  {chats.length === 0 ? (
-                    <div className="p-4 text-gray-400 text-sm text-center">
-                      No chats yet. Create one to get started!
-                    </div>
-                  ) : (
-                    chats.map((chat) => (
-                      <div
-                        key={chat.id}
-                        className={`p-3 border-b border-gray-700 cursor-pointer group hover:bg-gray-700 transition-colors ${
-                          currentChatId === chat.id ? 'bg-gray-700' : ''
-                        }`}
-                        onClick={() => switchChat(chat.id)}
-                      >
-                        <div className="flex items-start justify-between gap-2">
-                          <div className="flex-1 min-w-0">
-                            <p className="text-white text-sm truncate font-medium">
-                              {chat.title}
-                            </p>
-                            <p className="text-gray-400 text-xs mt-1">
-                              {new Date(chat.updatedAt).toLocaleDateString()}
-                            </p>
-                          </div>
-                          <button
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              deleteChat(chat.id);
-                            }}
-                            className="opacity-0 group-hover:opacity-100 text-gray-400 hover:text-red-400 transition-all p-1"
-                            title="Delete chat"
-                          >
-                            <Trash2 size={16} />
-                          </button>
-                        </div>
-                      </div>
-                    ))
-                  )}
-                </div>
-
-                <button
-                  onClick={createNewChat}
-                  className="m-4 w-full bg-blue-500 hover:bg-blue-600 text-white py-2 px-3 rounded-lg flex items-center justify-center gap-2 transition-colors"
-                >
-                  <Plus size={18} />
-                  New Chat
-                </button>
-              </div>
-            </div>
-
-            {/* Toggle Sidebar Button */}
-            {!showChatSidebar && (
-              <button
-                onClick={() => setShowChatSidebar(true)}
-                className="w-12 border-l border-gray-700 bg-gray-800 hover:bg-gray-700 text-white flex items-center justify-center transition-colors"
-                title="Show chat history"
-              >
-                →
-              </button>
-            )}
-          </div>
-        )}
-        {activeTab === 'notes' && (
-          <Notes
-            notes={notes}
-            onAddNote={handleAddNote}
-            onDeleteNote={handleDeleteNote}
-            onUpdateNote={handleUpdateNote}
-          />
-        )}
-        {activeTab === 'flashcards' && (
-          <Flashcards
-            flashcards={flashcards}
-            onAddFlashcard={handleAddFlashcard}
-            onDeleteFlashcard={handleDeleteFlashcard}
-            onReviewFlashcard={handleReviewFlashcard}
+          <ChatUI
+            messages={messages}
+            onSendMessage={handleSendMessage}
+            isLoading={isLoading}
           />
         )}
         {activeTab === 'settings' && (
