@@ -201,7 +201,7 @@ const toolFunctions: Record<string, (args: Record<string, string>) => Promise<st
         return JSON.stringify({ error: 'course_id is required' });
       }
       const params = { only_announcements: 'true', per_page: '100', ...args };
-      const courseId = (params as any).course_id;
+      const courseId = params.course_id;
       delete params.course_id;
       const queryString = buildQueryString(params);
       const response = await fetch(`https://q.utoronto.ca/api/v1/courses/${courseId}/discussion_topics${queryString}`, {
