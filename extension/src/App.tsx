@@ -112,6 +112,7 @@ For array parameters (include[], state[], filter[]), you can specify them multip
 Any parameters that are not explicitly stated to be required are optional
 
 Note that the course_id parameter must first be retrieved by calling get_courses. Always retrieve course information before making course-specific requests.
+IMPORTANT: Tool calls MUST be passed in the content part of your response
 
 You can include tool calls alongside regular text in your responses. Tools will be executed and results provided to you in the next response.
 Always use tool calls to gather relevant information before providing answers to the user. Be strategic with parameters to filter results and reduce data retrieval.
