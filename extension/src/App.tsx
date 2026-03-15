@@ -182,7 +182,7 @@ const toolFunctions: Record<string, (args: Record<string, string>) => Promise<st
       if (!args.course_id) {
         return JSON.stringify({ error: 'course_id is required' });
       }
-      const params = { per_page: '100', ...args } as any;
+      const params = { per_page: '100', ...args };
       const courseId = params.course_id;
       delete params.course_id;
       const queryString = buildQueryString(params);
@@ -200,8 +200,8 @@ const toolFunctions: Record<string, (args: Record<string, string>) => Promise<st
       if (!args.course_id) {
         return JSON.stringify({ error: 'course_id is required' });
       }
-      const params = { only_announcements: 'true', per_page: '100', ...args } as any;
-      const courseId = params.course_id;
+      const params = { only_announcements: 'true', per_page: '100', ...args };
+      const courseId = (params as any).course_id;
       delete params.course_id;
       const queryString = buildQueryString(params);
       const response = await fetch(`https://q.utoronto.ca/api/v1/courses/${courseId}/discussion_topics${queryString}`, {
@@ -245,7 +245,7 @@ const toolFunctions: Record<string, (args: Record<string, string>) => Promise<st
       if (!args.course_id) {
         return JSON.stringify({ error: 'course_id is required' });
       }
-      const params = { per_page: '100', ...args } as any;
+      const params = { per_page: '100', ...args };
       const courseId = params.course_id;
       delete params.course_id;
       const queryString = buildQueryString(params);
@@ -263,7 +263,7 @@ const toolFunctions: Record<string, (args: Record<string, string>) => Promise<st
       if (!args.course_id) {
         return JSON.stringify({ error: 'course_id is required' });
       }
-      const params = { per_page: '100', ...args } as any;
+      const params = { per_page: '100', ...args };
       const courseId = params.course_id;
       delete params.course_id;
       const queryString = buildQueryString(params);
@@ -281,7 +281,7 @@ const toolFunctions: Record<string, (args: Record<string, string>) => Promise<st
       if (!args.course_id || !args.module_id) {
         return JSON.stringify({ error: 'course_id and module_id are required' });
       }
-      const params = { per_page: '100', ...args } as any;
+      const params = { per_page: '100', ...args };
       const courseId = params.course_id;
       const moduleId = params.module_id;
       delete params.course_id;
