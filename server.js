@@ -1,13 +1,14 @@
 const express = require('express');
+const cors = require('cors');
 const pdfParse = require('pdf-parse');
 const pptx2json = require('pptx2json');
 const fs = require('fs');
 const path = require('path');
 const axios = require('axios');
-const multer = require('multer');
 
 const app = express();
 
+app.use(cors());
 app.use(express.json());
 
 app.post('/extract', async (req, res) => {
