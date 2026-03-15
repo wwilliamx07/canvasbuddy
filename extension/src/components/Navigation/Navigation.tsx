@@ -30,8 +30,8 @@ export const Navigation: React.FC<NavigationProps> = ({
     <aside className="w-48 bg-gradient-to-b from-slate-800 to-slate-900 flex flex-col shadow-lg h-full">
       {/* Header */}
       <div className="p-4 border-b border-slate-700">
-        <div className="w-10 h-10 rounded-lg bg-blue-500 flex items-center justify-center mb-4">
-          <span className="text-white font-bold">Q</span>
+        <div className="w-10 h-10 rounded-lg bg-blue-500 flex items-center justify-center mb-4 overflow-hidden">
+          <img src="/logo.png" alt="Logo" className="w-full h-full object-contain" />
         </div>
         <h1 className="text-white font-semibold text-lg">Quercus AI</h1>
       </div>

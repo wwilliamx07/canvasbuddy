@@ -4,7 +4,7 @@ import { marked } from 'marked';
 
 export interface Message {
   id: string;
-  role: 'user' | 'assistant';
+  role: 'user' | 'assistant' | 'system';
   content: string;
   timestamp: Date;
 }
@@ -40,11 +40,11 @@ export const ChatUI: React.FC<ChatUIProps> = ({ messages, onSendMessage, isLoadi
   return (
     <div className="flex flex-col h-full w-full bg-gray-50">
       {/* Messages Container */}
-      <div className="flex-1 overflow-y-auto px-4 py-3 space-y-4">
+      <div className="flex-1 overflow-y-auto px-4 py-3 space-y-4 w-full min-w-0">
         {messages.length === 0 ? (
           <div className="h-full flex flex-col items-center justify-center text-center">
             <div className="w-16 h-16 rounded-full bg-blue-100 flex items-center justify-center mb-4">
-              <span className="text-2xl">💬</span>
+              <img src="/logo.png" alt="Logo" className="w-full h-full object-contain rounded-full" />
             </div>
             <h2 className="text-xl font-semibold text-gray-800 mb-2">Chat with Quercus AI</h2>
             <p className="text-gray-500 max-w-xs">
@@ -55,10 +55,10 @@ export const ChatUI: React.FC<ChatUIProps> = ({ messages, onSendMessage, isLoadi
           messages.map((message) => (
             <div
               key={message.id}
-              className={`flex ${message.role === 'user' ? 'justify-end' : 'justify-start'} animate-fade-in`}
+              className={`flex ${message.role === 'user' ? 'justify-end' : 'justify-start'} animate-fade-in w-full min-w-0`}
             >
               <div
-                className={`max-w-md px-4 py-2 rounded-lg transition-all duration-300 ${
+                className={`max-w-[calc(100%-1rem)] sm:max-w-[90%] lg:max-w-2xl px-4 py-2 rounded-lg transition-all duration-300 overflow-hidden ${
                   message.role === 'user'
                     ? 'bg-blue-500 text-white rounded-br-none'
                     : 'bg-white text-gray-900 border border-gray-200 rounded-bl-none shadow-sm'
@@ -66,17 +66,17 @@ export const ChatUI: React.FC<ChatUIProps> = ({ messages, onSendMessage, isLoadi
               >
                 {message.role === 'assistant' ? (
                   <div
-                    className="prose prose-sm max-w-none dark:prose-invert"
+                    className="prose prose-sm max-w-none dark:prose-invert break-words [&_*]:break-words [&_code]:break-all [&_pre]:overflow-x-auto"
                     dangerouslySetInnerHTML={{
                       __html: marked(stripToolCalls(message.content)) as string,
                     }}
                   />
                 ) : (
-                  <div className="text-sm whitespace-pre-wrap">
+                  <div className="text-sm whitespace-pre-wrap break-words overflow-hidden">
                     {message.content}
                   </div>
                 )}
-                <span className="text-xs opacity-70 mt-1 block">
+                <span className="text-xs opacity-70 mt-1 block flex-shrink-0">
                   {message.timestamp.toLocaleTimeString([], {
                     hour: '2-digit',
                     minute: '2-digit',
@@ -88,7 +88,7 @@ export const ChatUI: React.FC<ChatUIProps> = ({ messages, onSendMessage, isLoadi
         )}
         
         {isLoading && (
-          <div className="flex justify-start">
+          <div className="flex justify-start w-full min-w-0">
             <div className="bg-white text-gray-900 border border-gray-200 rounded-lg rounded-bl-none px-4 py-2 shadow-sm">
               <div className="flex gap-1">
                 <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce"></div>
