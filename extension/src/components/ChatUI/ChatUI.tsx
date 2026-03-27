@@ -46,7 +46,7 @@ export const ChatUI: React.FC<ChatUIProps> = ({ messages, onSendMessage, isLoadi
             <div className="w-16 h-16 rounded-full bg-blue-100 flex items-center justify-center mb-4">
               <img src="/logo.png" alt="Logo" className="w-full h-full object-contain rounded-full" />
             </div>
-            <h2 className="text-xl font-semibold text-gray-800 mb-2">Chat with Quercus AI</h2>
+            <h2 className="text-xl font-semibold text-gray-800 mb-2">Chat with Canvas Buddy</h2>
             <p className="text-gray-500 max-w-xs">
               Ask questions about your courses, assignments, or anything related to your studies.
             </p>

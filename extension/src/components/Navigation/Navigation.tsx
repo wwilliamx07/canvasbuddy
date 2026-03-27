@@ -33,7 +33,7 @@ export const Navigation: React.FC<NavigationProps> = ({
         <div className="w-10 h-10 rounded-lg bg-blue-500 flex items-center justify-center mb-4 overflow-hidden">
           <img src="/logo.png" alt="Logo" className="w-full h-full object-contain" />
         </div>
-        <h1 className="text-white font-semibold text-lg">Quercus AI</h1>
+        <h1 className="text-white font-semibold text-lg">Canvas Buddy</h1>
       </div>
 
       {/* Navigation Tabs */}

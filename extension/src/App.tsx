@@ -3,6 +3,7 @@ import { Navigation } from './components/Navigation/Navigation';
 import { ChatUI } from './components/ChatUI/ChatUI';
 import type { Message } from './components/ChatUI/ChatUI';
 import { Settings, type AppSettings } from './components/Settings/Settings';
+import { extractTextFromFile } from './utils/textExtractor';
 import './App.css';
 
 // Types for chat persistence
@@ -316,7 +317,14 @@ const toolFunctions: Record<string, (args: Record<string, string>) => Promise<st
       if (!args.file_id) {
         return JSON.stringify({ error: 'file_id is required' });
       }
-      // First, get the public URL of the file
+      // First, get the file metadata to get the filename
+      const fileMetadataResponse = await fetch(`https://q.utoronto.ca/api/v1/files/${args.file_id}`, {
+        credentials: 'include',
+      });
+      const fileMetadata = await fileMetadataResponse.json();
+      const fileName = fileMetadata.filename;
+
+      // Get the public URL of the file
       const urlResponse = await fetch(`https://q.utoronto.ca/api/v1/files/${args.file_id}/public_url`, {
         credentials: 'include',
       });
@@ -327,17 +335,13 @@ const toolFunctions: Record<string, (args: Record<string, string>) => Promise<st
         return JSON.stringify({ error: 'Unable to get file URL' });
       }
 
-      // POST the file URL to the text extraction endpoint
-      const extractResponse = await fetch('http://localhost:3000/extract', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ url: fileUrl }),
-      });
+      // Download the file
+      const fileResponse = await fetch(fileUrl);
+      const fileBuffer = await fileResponse.arrayBuffer();
 
-      const extractedData = await extractResponse.json();
-      return JSON.stringify(extractedData);
+      // Extract text using local utility
+      const text = await extractTextFromFile(fileBuffer, fileName);
+      return JSON.stringify({ text });
     } catch (error) {
       return JSON.stringify({ error: (error as Error).message });
     }
@@ -392,9 +396,10 @@ function App() {
   const [conversationHistory, setConversationHistory] = useState<ConversationMessage[]>([]); // Internal history for API
   const [isLoading, setIsLoading] = useState(false);
   const [settings, setSettings] = useState<AppSettings>({
-    apiKey: 'test',
-    baseUrl: 'https://vjioo4r1vyvcozuj.us-east-2.aws.endpoints.huggingface.cloud/v1',
-    model: 'openai/gpt-oss-120b',
+    apiKey: '',
+    baseUrl: '',
+    model: 'gemini-3.1-flash-lite-preview',
+    llmProvider: 'google',
   });
 
   // Load chats from localStorage on mount
@@ -506,6 +511,64 @@ function App() {
     localStorage.setItem('canvas-buddy-settings', JSON.stringify(newSettings));
   };
 
+  // Call LLM API with support for both OpenAI and Google AI
+  const callLLM = async (
+    messages: ConversationMessage[],
+    settings: AppSettings
+  ): Promise<string> => {
+    if (settings.llmProvider === 'openai') {
+      // OpenAI API call
+      const response = await fetch(`${settings.baseUrl}/chat/completions`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${settings.apiKey}`,
+        },
+        body: JSON.stringify({
+          model: settings.model,
+          messages: messages,
+          max_tokens: 2000,
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`API Error: ${response.body}`);
+      }
+
+      const data = await response.json();
+      return data.choices[0].message.content || '';
+    } else if (settings.llmProvider === 'google') {
+      // Google AI API call
+      const response = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/${settings.model}:generateContent?key=${settings.apiKey}`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            contents: messages.map((msg) => ({
+              role: msg.role === 'user' ? 'user' : 'model',
+              parts: [{ text: msg.content }],
+            })),
+            generationConfig: {
+              maxOutputTokens: 2000,
+            },
+          }),
+        }
+      );
+
+      if (!response.ok) {
+        throw new Error(`API Error: ${response.statusText}`);
+      }
+
+      const data = await response.json();
+      return data.candidates[0].content.parts[0].text || '';
+    } else {
+      throw new Error('Unknown LLM provider');
+    }
+  };
+
   // Chat handlers
   const handleSendMessage = async (content: string) => {
     // Auto-create a chat if none is selected
@@ -553,28 +616,7 @@ function App() {
 
       // Keep calling the API until there are no more tool calls
       while (true) {
-        const response = await fetch(
-          `${settings.baseUrl}/chat/completions`,
-          {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              Authorization: `Bearer ${settings.apiKey}`,
-            },
-            body: JSON.stringify({
-              model: settings.model,
-              messages: currentConversationHistory,
-              max_tokens: 2000,
-            }),
-          }
-        );
-
-        if (!response.ok) {
-          throw new Error(`API Error: ${response.statusText}`);
-        }
-
-        const data = await response.json();
-        const assistantContent = data.choices[0].message.content || '';
+        const assistantContent = await callLLM(currentConversationHistory, settings);
 
         // Add assistant's response to both display and conversation history
         if (assistantContent) {

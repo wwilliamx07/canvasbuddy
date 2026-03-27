@@ -5,6 +5,7 @@ export interface AppSettings {
   apiKey: string;
   baseUrl: string;
   model: string;
+  llmProvider: 'openai' | 'google';
 }
 
 interface SettingsProps {
@@ -33,6 +34,24 @@ export const Settings: React.FC<SettingsProps> = ({ settings, onSettingsChange }
       <h1 className="text-3xl font-bold text-gray-900 mb-6">Settings</h1>
 
       <div className="max-w-2xl space-y-6">
+        {/* LLM Provider */}
+        <div>
+          <label className="block text-sm font-semibold text-gray-800 mb-2">
+            LLM Provider
+          </label>
+          <select
+            value={form.llmProvider}
+            onChange={(e) => handleChange('llmProvider', e.target.value)}
+            className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-200"
+          >
+            <option value="openai">OpenAI</option>
+            <option value="google">Google AI</option>
+          </select>
+          <p className="text-xs text-gray-500 mt-1">
+            Choose which LLM provider to use for AI responses
+          </p>
+        </div>
+
         {/* API Key */}
         <div>
           <label className="block text-sm font-semibold text-gray-800 mb-2">
