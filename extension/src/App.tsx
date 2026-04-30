@@ -563,7 +563,11 @@ function App() {
       }
 
       const data = await response.json();
-      return data.candidates[0].content.parts[0].text || '';
+      let output = ''
+      for (const part of data.candidates[0].content.parts) {
+        output += part.text + '\n'
+      }
+      return output.trim()
     } else {
       throw new Error('Unknown LLM provider');
     }

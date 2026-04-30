@@ -1,8 +1,11 @@
 import * as pdfjsLib from 'pdfjs-dist';
+// Use the ESM build (.mjs) shipped with `pdfjs-dist` so Vite/Rollup can
+// resolve and bundle the worker file correctly at build time.
+import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.mjs?url';
 import JSZip from 'jszip';
 
-// Set up the worker for PDF.js
-pdfjsLib.GlobalWorkerOptions.workerSrc = `//cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsLib.version}/pdf.worker.min.js`;
+// Set up the worker for PDF.js using the bundled worker URL
+pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl as unknown as string;
 
 /**
  * Extract text from a PDF file
