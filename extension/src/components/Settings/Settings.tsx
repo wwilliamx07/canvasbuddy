@@ -6,24 +6,30 @@ export interface AppSettings {
   baseUrl: string;
   model: string;
   llmProvider: 'openai' | 'google';
+  contextThreshold: number;
 }
 
 interface SettingsProps {
   settings: AppSettings;
   onSettingsChange: (settings: AppSettings) => void;
+  currentContextTokens?: number;
 }
 
-export const Settings: React.FC<SettingsProps> = ({ settings, onSettingsChange }) => {
+export const Settings: React.FC<SettingsProps> = ({ settings, onSettingsChange, currentContextTokens = 0 }) => {
   const [showApiKey, setShowApiKey] = useState(false);
   const [form, setForm] = useState(settings);
 
-  const handleChange = (field: keyof AppSettings, value: string) => {
-    setForm({ ...form, [field]: value });
+  React.useEffect(() => {
+    setForm(settings);
+  }, [settings]);
+
+  const handleChange = (field: keyof AppSettings, value: string | number) => {
+    const updated = { ...form, [field]: value };
+    setForm(updated);
+    // Auto-save immediately on any change to persist settings
+    onSettingsChange(updated);
   };
 
-  const handleSave = () => {
-    onSettingsChange(form);
-  };
 
   const handleReset = () => {
     setForm(settings);
@@ -112,14 +118,60 @@ export const Settings: React.FC<SettingsProps> = ({ settings, onSettingsChange }
           </p>
         </div>
 
+        {/* Context Optimization */}
+        <div className="pt-2 border-t border-gray-200 space-y-3">
+          <div>
+            <label className="block text-sm font-semibold text-gray-800 mb-2">
+              Max Context Before Summarization
+            </label>
+            <div className="space-y-2">
+              <input
+                type="range"
+                min={5000}
+                max={100000}
+                step={500}
+                value={form.contextThreshold}
+                onChange={(e) => handleChange('contextThreshold', Number(e.target.value))}
+                className="w-full cursor-pointer"
+              />
+              <div className="flex items-center gap-3">
+                <input
+                  type="number"
+                  value={form.contextThreshold}
+                  onChange={(e) => {
+                    const parsed = Number(e.target.value);
+                    if (!Number.isNaN(parsed)) {
+                      handleChange('contextThreshold', parsed);
+                    }
+                  }}
+                  className="w-40 px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-200"
+                />
+                <span className="text-xs text-gray-500">tokens</span>
+              </div>
+            </div>
+            <p className="text-xs text-gray-500 mt-1">
+              Slider range is 5,000 to 100,000 tokens. The number field accepts any value.
+            </p>
+          </div>
+
+          <div className="bg-gray-100 rounded-lg p-3 text-sm text-gray-700">
+            <div className="flex items-center justify-between">
+              <span className="font-medium">Current context estimate</span>
+              <span>
+                {currentContextTokens.toLocaleString()} / {form.contextThreshold.toLocaleString()} tokens
+              </span>
+            </div>
+            <div className="mt-2 h-2 w-full bg-gray-200 rounded-full overflow-hidden">
+              <div
+                className="h-full bg-blue-500 rounded-full transition-all"
+                style={{ width: `${Math.min(100, (currentContextTokens / Math.max(form.contextThreshold, 1)) * 100)}%` }}
+              />
+            </div>
+          </div>
+        </div>
+
         {/* Action Buttons */}
         <div className="flex gap-3 pt-4">
-          <button
-            onClick={handleSave}
-            className="px-6 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded-lg font-medium transition-colors"
-          >
-            Save Settings
-          </button>
           <button
             onClick={handleReset}
             className="px-6 py-2 bg-gray-300 hover:bg-gray-400 text-gray-800 rounded-lg font-medium transition-colors"
