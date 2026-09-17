@@ -75,7 +75,7 @@ Each collection is a `CollectionSpec` in the registry: a `sync` (full or, given 
 | `submissions` | `/students/submissions?student_ids[]=self` | — (TTL) | — |
 | `announcements` | `/discussion_topics?only_announcements=true` (newest 100) | newest `id:posted_at` | — |
 | `planner` | `/planner/items` for the rolling window (`PLANNER_WINDOW` −7 d…+28 d), replaced wholesale | — (TTL) | — |
-| `inbox` | `/conversations` (newest 200) + `/conversations/:id` for threads | newest `id:last_message_at` | yes: a thread is fetched only when its `last_message_at` differs from `thread_synced_for` (cap 30 per sync); messages are inserted by id and **embedded once** (chunk id = message id, NULL vector if no API key, filled in on a later sync) |
+| `inbox` | `/conversations` (newest 200) + `/conversations/:id` for threads | newest `id:last_message_at` | yes: a thread is fetched only when its `last_message_at` differs from `thread_synced_for` (cap 30 per sync); messages are inserted by id as text chunks with a NULL vector. **The sync never embeds** — `embedConversationIfNeeded` embeds a thread's missing vectors the first time `search_documents` targets it. |
 
 ## Freshness (`canvas/freshness.ts`, `canvas/collections.ts`)
 

@@ -315,6 +315,12 @@ export async function listConversations(options: {
   return (await db.query(sql, params)).rows;
 }
 
+export async function getConversationSubject(conversationId: string): Promise<string> {
+  const db = await getDB();
+  const res = await db.query<{ subject: string | null }>('SELECT subject FROM conversations WHERE conversation_id = $1', [String(conversationId)]);
+  return res.rows[0]?.subject || `Conversation ${conversationId}`;
+}
+
 export async function getConversationMessages(conversationId: string): Promise<any[]> {
   const db = await getDB();
   const res = await db.query(

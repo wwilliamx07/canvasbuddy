@@ -27,6 +27,7 @@ Things that are easy to break because the reason for them is not visible at the 
 - **The system prompt and tool descriptions are one contract.** Changing what a tool does without updating its description (and any prompt rule naming it) will produce confident misuse.
 - **No staleness language in the prompt or tool descriptions.** The model must not be told to "go live", "re-sync" or judge ages; that is the engine's job. `refresh` is the only cache-related parameter and is reserved for "the user says something changed".
 - **Tools call `ensureCollection` before reading a collection**, and never fetch Canvas list data themselves.
+- **Lazy embedding is a rule.** No sync path may call the embedding API. Embed a document only when a semantic search is about to target it (`indexDocumentJustInTime` for files/pages/assignments, `embedConversationIfNeeded` for threads). Text is stored eagerly because it is free and keyword-searchable; vectors are not.
 - **Digests are `role: 'system'` messages.** OpenAI accepts them mid-history; Gemini folds them into `systemInstruction`. Don't emit them as user/assistant turns or they will be summarized again as conversation.
 
 ## Canvas

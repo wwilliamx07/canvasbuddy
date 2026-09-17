@@ -23,7 +23,7 @@ CanvasBuddy is a personal AI agent for the University of Toronto's Quercus (Canv
 
 The model never chooses between "live" and "cached" data and has no staleness rules; the only cache-related parameter is `refresh`, reserved for when you say something changed.
 
-Documents are indexed just in time: the first question about a file downloads it, extracts text per page/slide, embeds it (768-d) and stores chunks with a full-text index; later questions hit the local index. Inbox messages are embedded once, incrementally, as they arrive.
+Documents are indexed just in time: the first question about a file downloads it, extracts text per page/slide, embeds it (768-d) and stores chunks with a full-text index; later questions hit the local index. Inbox threads are stored as text when the inbox syncs (keyword-searchable for free) and embedded only when a semantic search targets that thread.
 
 **Architecture**
 - Manifest V3 extension for Chrome/Edge, opened as a side panel; Canvas is reached with your existing login session (no Canvas token)

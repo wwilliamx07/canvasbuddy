@@ -1,5 +1,5 @@
 import type { AppSettings } from '../components/Settings/Settings';
-import { ensureCollection, ensureCollections, fetchPlannerRange, plannerWindow } from '../canvas/collections';
+import { ensureCollection, ensureCollections, fetchPlannerRange, plannerWindow, embedConversationIfNeeded } from '../canvas/collections';
 import { describeEnsure, type EnsureResult } from '../canvas/freshness';
 import { indexDocumentJustInTime, fetchAssignmentWithDescription } from '../canvas/sync';
 import {
@@ -89,7 +89,7 @@ export const TOOL_CONFIG: ToolConfig[] = [
   {
     name: 'search_documents',
     description:
-      'Semantic + keyword search over course documents (PDF/PPTX files, wiki pages, assignment descriptions) and inbox messages; returns the best excerpts with document name and page/slide for citation. To search inside one specific document, pass document_type + document_id (from list_content); it is indexed automatically if needed. Without them, only documents that were previously indexed are searched.',
+      'Semantic + keyword search over course documents (PDF/PPTX files, wiki pages, assignment descriptions) and inbox messages; returns the best excerpts with document name and page/slide for citation. To search inside one specific document, pass document_type + document_id (from list_content); it is indexed automatically if needed. Without them, previously indexed documents are searched semantically and all stored inbox messages by keyword.',
     parameters: {
       type: 'OBJECT',
       properties: {
@@ -202,7 +202,10 @@ async function ensureDocumentIndexed(
     const docId = docIdFor('conversation', id);
     const state = await getDocumentCacheState(docId);
     if (!state) throw new Error(`Conversation ${id} is not in the inbox cache. Call get_inbox first.`);
-    return { docId, title: `Inbox thread ${id}`, note: describeEnsure(r) || undefined };
+    // Lazy: this thread is about to be searched semantically, so embed it now (new messages only)
+    const embedded = await embedConversationIfNeeded(id, settings);
+    const notes = [describeEnsure(r), embedded ? `Embedded ${embedded} messages of this thread.` : null].filter(Boolean);
+    return { docId, title: `Inbox thread ${id}`, note: notes.join(' ') || undefined };
   }
   const res = await indexDocumentJustInTime({ sourceType: type, sourceId: id, courseId }, settings);
   return {

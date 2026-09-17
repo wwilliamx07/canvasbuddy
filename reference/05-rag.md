@@ -4,7 +4,7 @@ Sources: `src/canvas/sync.ts` (`indexDocumentJustInTime`, `loadDocumentSource`, 
 
 ## Design
 
-Documents are indexed **just in time**, not in bulk: nothing is downloaded or embedded until the agent (or the user in the Graph Explorer) asks for a specific document. Indexing stores per-page/slide chunks with 768-d vectors and a full-text index in PGlite; search fuses vector and keyword ranking. Answers cite the document and page/slide because chunk boundaries never cross a page.
+Documents are indexed **just in time**, not in bulk: nothing is downloaded or embedded until the agent (or the user in the Graph Explorer) asks for a specific document. This is a rule, not an optimization: **no sync ever spends embedding calls**; vectors are computed only for a document a semantic search is about to look through. Indexing stores per-page/slide chunks with 768-d vectors and a full-text index in PGlite; search fuses vector and keyword ranking. Answers cite the document and page/slide because chunk boundaries never cross a page.
 
 Four document kinds live in the same tables (`DocumentSourceType = 'file' | 'page' | 'assignment' | 'conversation'`); the first three share the JIT pipeline below, inbox threads are indexed incrementally during the inbox sync:
 
@@ -13,7 +13,7 @@ Four document kinds live in the same tables (`DocumentSourceType = 'file' | 'pag
 | Canvas file (PDF, PPTX) | file id | file id | download via `/files/:id/public_url`, parse |
 | Wiki page | page slug | `page:<course>:<slug>` | `body` from `/courses/:id/pages/:slug`, `htmlToText` |
 | Assignment description | assignment id | `assignment:<id>` | `description` from `/courses/:id/assignments/:id` (also cached into `assignments.description`), `htmlToText` |
-| Inbox thread | conversation id | `conversation:<id>` | messages from `/conversations/:id` during the inbox sync; one chunk per message, chunk id = message id, `upsertDocumentChunksIncremental` inserts and embeds only new messages |
+| Inbox thread | conversation id | `conversation:<id>` | messages from `/conversations/:id` during the inbox sync; one chunk per message, chunk id = message id, stored with a NULL vector. `embedConversationIfNeeded` (called by `search_documents` when it targets the thread) embeds only the messages still lacking a vector. |
 
 Doc ids come from `docIdFor()` in `db/rag.ts`; nothing else builds them by hand.
 
@@ -54,7 +54,7 @@ Points worth knowing:
 ## Storage (`db/rag.ts`)
 
 - `storeChunksWithEmbeddings` (files/pages/assignments) upserts the `files` row, deletes existing chunks for the doc, and inserts new ones with `embedding = $::vector` and `content_tsv = to_tsvector('english', content)`. Every chunk is re-embedded on re-index (per-chunk hash reuse is plan.md Tier 3 #9).
-- `upsertDocumentChunksIncremental` (conversations) keys chunks by a stable id, inserts only new ones, keeps a NULL vector when no API key is configured, and `getChunksMissingEmbedding` / `setChunkEmbeddings` fill vectors in on a later sync.
+- `upsertDocumentChunksIncremental` (conversations) keys chunks by a stable id, inserts only new ones, always with a NULL vector; `getChunksMissingEmbedding` / `setChunkEmbeddings` fill vectors in when `embedConversationIfNeeded` runs.
 - `upsertAndPruneKnownFiles` (files collection sync) registers files with `total_chunks = 0`, resets chunks to 0 if the version changed, and deletes the stale chunks so an outdated version is not searchable.
 - Indexes: GIN on `content_tsv`; B-tree on `file_id`, `course_id`. There is no HNSW/IVF index on `embedding`; vector search is a sequential scan, acceptable at a student's scale (thousands of chunks).
 
@@ -76,7 +76,7 @@ result = fused ⋈ file_chunks ⋈ files ⋈ courses, plus ONE module name via L
 ## Callers
 
 - Agent: `search_documents` (indexes the named document via `indexDocumentJustInTime` when `document_id` is given, then `getEmbedding(query)` + `searchChunksHybrid`), `read_document` (indexes if needed, then `getFileChunks(docId, pageRange)`).
-- Inbox sync (`canvas/collections.ts`): stores and embeds thread messages.
+- Inbox sync (`canvas/collections.ts`): stores thread messages as text; `embedConversationIfNeeded` embeds on first semantic search.
 - Graph Explorer: the "Index for search" button on a selected file/page/assignment node calls the same `indexDocumentJustInTime`; `getFileChunks(docId)` shows stored chunks in the side panel.
 
 ## Extending

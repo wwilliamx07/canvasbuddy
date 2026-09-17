@@ -6,7 +6,6 @@ import {
   type EnsureResult,
   type ProbeResult,
   type ScopeContext,
-  type SyncInfo,
   type SyncState,
 } from './freshness';
 import { canvasGet, fetchAllPages, CanvasHttpError } from './http';
@@ -22,6 +21,7 @@ import {
   replacePlannerItems,
   upsertAndPruneConversations,
   upsertMessages,
+  getConversationSubject,
 } from '../db/graph';
 import {
   docIdFor,
@@ -32,6 +32,7 @@ import {
 } from '../db/rag';
 import { batchEmbed, resolveEmbeddingModel } from '../embeddings/embeddingClient';
 import { htmlToText } from '../utils/textExtractor';
+import type { AppSettings } from '../components/Settings/Settings';
 import type {
   CanvasCourse,
   CanvasModule,
@@ -406,7 +407,9 @@ const planner: CollectionSpec = {
 };
 
 // ---------------------------------------------------------------------------
-// inbox — newest last_message_at probe; threads fetched per changed conversation and embedded once
+// inbox — newest last_message_at probe; threads fetched per changed conversation. Messages are stored
+// as text only (keyword-searchable); a thread is embedded lazily, the first time a semantic search
+// targets it (embedConversationIfNeeded), never at sync time.
 // ---------------------------------------------------------------------------
 
 interface CanvasConversation {
@@ -460,13 +463,17 @@ function shapeMessages(thread: CanvasConversation): ShapedMessage[] {
     }));
 }
 
-/** Embeds chunks of a thread that lack a vector. Silently skips when no API key is set. */
-async function embedThread(docId: string, subject: string, info: SyncInfo): Promise<number> {
-  if (!info.settings.apiKey) return 0;
+/**
+ * Embeds the messages of one thread that have no vector yet. Called only when a semantic search is
+ * about to target this thread — the inbox sync never embeds. Returns how many messages were embedded.
+ */
+export async function embedConversationIfNeeded(conversationId: string, settings: AppSettings): Promise<number> {
+  const docId = docIdFor('conversation', conversationId);
   const missing = await getChunksMissingEmbedding(docId);
   if (missing.length === 0) return 0;
-  const model = resolveEmbeddingModel(info.settings);
-  const vectors = await batchEmbed(missing.map((m) => `Inbox · ${subject}\n${m.content}`), info.settings, 'document');
+  const subject = await getConversationSubject(conversationId);
+  const model = resolveEmbeddingModel(settings);
+  const vectors = await batchEmbed(missing.map((m) => `Inbox · ${subject}\n${m.content}`), settings, 'document');
   await setChunkEmbeddings(docId, missing.map((m, i) => ({ chunkId: m.chunk_id, embedding: vectors[i] })), model);
   return missing.length;
 }
@@ -478,14 +485,14 @@ const inbox: CollectionSpec = {
     const marker = rows[0] ? `${rows[0].id}:${rows[0].last_message_at}` : 'empty';
     return marker === state.fingerprint ? { kind: 'unchanged' } : { kind: 'changed' };
   },
-  sync: async (_ctx, info) => {
+  sync: async () => {
     const list = await fetchAllPages<CanvasConversation>(`/conversations?per_page=100`, 'inbox', INBOX_LIST_PAGES);
     const shaped = list.map(shapeConversation);
     const { upserted, pruned, staleThreads } = await withTransaction((tx) => upsertAndPruneConversations(shaped, tx));
 
-    // Threads: only conversations whose last_message_at moved since their messages were stored
+    // Threads: only conversations whose last_message_at moved since their messages were stored.
+    // Text only — no embedding API calls here.
     let threads = 0;
-    let embedded = 0;
     const byId = new Map(shaped.map((c) => [c.conversation_id, c]));
     for (const id of staleThreads.slice(0, INBOX_THREAD_FETCH_CAP)) {
       const conv = byId.get(id);
@@ -500,7 +507,7 @@ const inbox: CollectionSpec = {
         courseId: conv?.course_id ?? null,
         title: `Inbox: ${subject}`,
         version: conv?.last_message_at ?? '1',
-        embeddingModel: info.settings.apiKey ? resolveEmbeddingModel(info.settings) : null,
+        embeddingModel: null,
         chunks: messages.map((m, i) => ({
           chunkId: `${docId}:msg:${m.message_id}`,
           chunkIndex: i,
@@ -508,14 +515,13 @@ const inbox: CollectionSpec = {
           embedding: null,
         })),
       });
-      embedded += await embedThread(docId, subject, info);
       threads++;
     }
 
     const marker = list[0] ? `${list[0].id}:${list[0].last_message_at}` : 'empty';
     return {
       fingerprint: marker,
-      summary: `${upserted} conversations (${pruned} pruned), ${threads} threads updated, ${embedded} messages embedded`,
+      summary: `${upserted} conversations (${pruned} pruned), ${threads} threads updated`,
     };
   },
 };
