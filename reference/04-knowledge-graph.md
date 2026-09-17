@@ -1,0 +1,116 @@
+# 04 — Knowledge graph (PGlite)
+
+Sources: `src/db/pglite.ts`, `src/db/schema.ts`, `src/db/graph.ts`, `src/canvas/freshness.ts`, `src/canvas/collections.ts`, `src/canvas/http.ts`.
+
+## Why a local Postgres
+
+The graph is a **cache of Canvas structure** that makes most agent questions answerable without a network call and with compact, filterable rows. Postgres (via PGlite, compiled to WASM) was chosen over a key-value store because the queries are relational (joins across modules → items → files, staleness computed from timestamps) and because pgvector + full-text search give hybrid RAG in the same engine. Everything persists to IndexedDB at `idb://canvas-buddy-db`.
+
+## Database lifecycle (`db/pglite.ts`)
+
+- `getDB()` returns a process-wide singleton; concurrent callers share one init promise.
+- Init runs `SCHEMA_SQL` every time. The schema is written to be **idempotent** (`CREATE … IF NOT EXISTS`, `ALTER TABLE … ADD COLUMN IF NOT EXISTS`), so migrations are just appended to `schema.ts`.
+- **Exclusive Web Lock.** PGlite's IndexedDB filesystem is not safe to open from two pages at once, and Chrome opens one side panel per window. `acquireExclusiveLock` requests `navigator.locks` `canvas-buddy-pglite` with `ifAvailable: true` and holds it for the page lifetime. A second panel throws a clear "already open in another window" error instead of corrupting the database.
+
+## Schema
+
+```
+courses (course_id PK, name, course_code, term, synced_at,
+         modules_synced_at, assignments_synced_at, files_synced_at, pages_synced_at)  -- legacy, unused
+   │
+   ├── modules (module_id PK, course_id FK cascade, name, position, synced_at)
+   │      └── module_items (item_id PK, module_id FK cascade, item_type, title, position,
+   │                        content_ref, html_url, synced_at)
+   ├── assignments (assignment_id PK, course_id FK cascade, name, due_at, points_possible, html_url,
+   │                submission_types, group_name, updated_at, synced_at,
+   │                description [raw HTML, lazy], description_version [updated_at it was fetched at])
+   ├── submissions (assignment_id PK, course_id FK cascade, workflow_state, submitted_at, graded_at,
+   │                score, grade, late, missing, excused, synced_at)          -- the student's own
+   ├── announcements (announcement_id PK, course_id FK cascade, title, posted_at, author,
+   │                  text [HTML→text], html_url, synced_at)
+   ├── pages (PK (course_id, page_url), title, updated_at, html_url, synced_at)
+   └── files (file_id PK, course_id FK set-null, filename, display_name, version,
+              extracted_at, total_chunks, source_type, embedding_model, html_url, content_type, size)
+          └── file_chunks (chunk_id PK, file_id FK cascade, chunk_index, page_number,
+                           content, token_count, embedding VECTOR(768), content_tsv TSVECTOR)
+
+planner_items (item_key PK '<type>:<id>', plannable_type, plannable_id, course_id [no FK], context_name,
+               title, date, points, submitted, late, missing, graded, new_activity, html_url)
+conversations (conversation_id PK, subject, context_name, course_id [no FK], participants JSON,
+               last_message, last_message_at, workflow_state, message_count, starred, thread_synced_for)
+   └── messages (message_id PK, conversation_id FK cascade, author_id, author_name, created_at, body, body_tsv)
+
+graph_edges (edge_id, from_type, from_id, to_type, to_id, relation)   -- no FKs
+
+sync_state (scope PK, synced_at, probed_at, fingerprint, status ok|unavailable, error)
+   -- scope = 'courses' | 'planner' | 'inbox' | 'course:<id>:<collection>'; owned by freshness.ts
+```
+
+Key modelling decisions:
+
+- **All ids are `TEXT`.** Canvas ids are numeric but are stringified everywhere (`String(x)`) so the same column can hold page slugs and composite ids.
+- **`module_items.content_ref`** is the pointer into the content tables: a file id for `File` items, a page slug for `Page` items, an assignment/quiz id otherwise. It is the `document_id` that `search_documents` / `read_document` take.
+- **`files` is the "documents" table**, not just Canvas files. `source_type` is `'file' | 'page' | 'assignment' | 'conversation'` and `file_id` comes from `docIdFor()` in `db/rag.ts` (`<file id>`, `page:<course>:<slug>`, `assignment:<id>`, `conversation:<id>`). A row with `total_chunks = 0` is *known but not indexed*; this is how the `indexed` flag is derived in every query.
+- **`assignments.description` is lazy.** The compact `assignment_groups` listing omits it; `get_assignment` / indexing fetch it once and cache it while `description_version = updated_at`. A sync that sees a new `updated_at` nulls it.
+- **`planner_items` and `conversations` have no course FK** because the planner and inbox can reference courses that are not in the graph; `files.course_id` for a conversation is looked up and left NULL if unknown.
+- **`sync_state`** is the single record of when each scope was synced/probed, its probe fingerprint, and whether the course hides it (`unavailable`). Staleness can be judged even when a collection is legitimately empty. The legacy `*_synced_at` columns on `courses` are migrated into it on startup and no longer written.
+- **`graph_edges`** holds `prerequisite` edges between modules and `references` edges from module items to files. It has no foreign keys, so `pruneOrphanEdges` runs after every module/item sync.
+
+## Sync semantics (`canvas/collections.ts` → `db/graph.ts`, `db/rag.ts`)
+
+Each collection is a `CollectionSpec` in the registry: a `sync` (full or, given probe data, partial) and optionally a `probe`. Syncs are **full-list + prune**, run **inside one transaction** (`withTransaction`), and **shape at store time**:
+
+1. `fetchAllPages` (`canvas/http.ts`) follows `Link: rel="next"` until exhausted (or `maxPages` for newest-N collections). A non-OK page throws `CanvasHttpError` (with status); a partial list is never stored.
+2. Rows are projected to the shaped types in `types/canvas.ts` (HTML → text, fields the model needs) and upserted with `ON CONFLICT DO UPDATE`.
+3. `DELETE … WHERE <scope> AND id NOT IN (…)` prunes anything not in the fresh list, plus dependent document rows (indexed descriptions of deleted assignments, pages, conversations).
+4. The freshness engine records the outcome (and the probe fingerprint the sync returns) in `sync_state`.
+
+| Collection | Canvas source | Probe (within TTL) | Partial update |
+|---|---|---|---|
+| `courses` | `/courses?enrollment_state=active&include[]=term` | — (TTL) | — |
+| `modules` | `/modules?include[]=items` (+ per-module items when Canvas omits them) | module list **without** items (~350 B) → per-module fingerprint `name|position|items_count|prereqs`, stored as JSON in `sync_state.fingerprint` | yes: items re-fetched only for modules whose fingerprint changed; prune handles removals |
+| `assignments` | `/assignment_groups?include[]=assignments&exclude_response_fields[]=description,rubric` (≈50 % of the plain list); falls back to `/assignments` | — (TTL; no narrow query exists) | — |
+| `files` | `/files` | newest `updated_at` via `sort=updated_at&per_page=1` — **feature-detected**; 403/404 marks the course's Files area unavailable | — |
+| `pages` | `/pages?published=true` | same — feature-detected | — |
+| `submissions` | `/students/submissions?student_ids[]=self` | — (TTL) | — |
+| `announcements` | `/discussion_topics?only_announcements=true` (newest 100) | newest `id:posted_at` | — |
+| `planner` | `/planner/items` for the rolling window (`PLANNER_WINDOW` −7 d…+28 d), replaced wholesale | — (TTL) | — |
+| `inbox` | `/conversations` (newest 200) + `/conversations/:id` for threads | newest `id:last_message_at` | yes: a thread is fetched only when its `last_message_at` differs from `thread_synced_for` (cap 30 per sync); messages are inserted by id and **embedded once** (chunk id = message id, NULL vector if no API key, filled in on a later sync) |
+
+## Freshness (`canvas/freshness.ts`, `canvas/collections.ts`)
+
+Freshness is **code policy, not model discretion**. Anything that needs a collection calls
+`ensureCollection(kind, { courseId }, { settings, refresh? })` first; it returns an `EnsureResult`
+(`fresh | synced | unavailable | error`, `syncedNow`, `ageMinutes`, `summary`, `error`) and never throws.
+
+Decision procedure per scope:
+
+```
+refresh: true                       → sync now (bypasses everything)
+status = unavailable, retry not due → return unavailable
+probed within probeDebounce         → fresh
+never synced, or age ≥ TTL          → full sync   (also the backstop for deletions a probe can't see)
+within TTL and spec has a probe     → probe: changed → sync (with probe data) · unchanged/unsupported → fresh
+within TTL, no probe                → fresh
+```
+
+- **TTLs** are per collection, in minutes, from `settings.freshness` (editable in Settings → Freshness; defaults in `DEFAULT_FRESHNESS`).
+- **Unavailable**: a 403/404 from Canvas (`isUnavailableError`) marks the scope `unavailable` with the error; it is skipped until `unavailableRetry` elapses or the user forces `refresh`. All three probed UofT courses hide Files and Pages, so this is the normal case, not an edge case. One unavailable collection never aborts a multi-collection refresh (`ensureCollections`).
+- **In-flight dedupe**: concurrent calls for the same scope (agent + Graph Explorer) share one promise.
+- **Registry** (`COLLECTIONS` in `collections.ts`): each `CollectionSpec` declares `kind`, `sync(ctx, { state, probeData, settings })` and optionally `probe(ctx, state)`. All nine kinds are registered (see the table above).
+- **Overview text** (`getGraphOverviewText`) is now just the course roster (names + ids). `exploreGraph('courses')` reports `files_status`/`pages_status` from `sync_state`.
+
+## Query layer (`db/graph.ts`)
+
+- `exploreGraph({ entity_type, course_id, module_id, search_term, limit, include_items, bucket, include_submission })` builds a parameterized query per entity type. All string filters are `ILIKE '%term%'`; limits are clamped to 1–200 (default 25). Rows are projected to what the model needs (ids, names, dates, positions, `indexed` — computed for File, Page and Assignment items alike). `bucket` filters assignments by due date; `include_submission` joins the student's submission row.
+- Tool-specific reads: `getAssignmentRow`, `listAnnouncements`, `listPlannerItems`, `listConversations` (subject/last-message ILIKE + message FTS, returns `matching_message`), `getConversationMessages`.
+- `getCourseHierarchy(courseId, includeItems)` returns `{ course, treeNodes, assignments, prerequisites }` for the Graph Explorer. `treeNodes` is a flat list (modules at depth 0, items at depth 1) regrouped client-side; `assignments` is projected (no description).
+- `getGraphStatistics()` — six `COUNT(*)`s for the explorer's ribbon.
+
+## Adding a collection or column
+
+1. Add DDL and an idempotent `ALTER TABLE … ADD COLUMN IF NOT EXISTS` to `schema.ts`.
+2. Add a Canvas type to `types/canvas.ts`.
+3. Add a shaped row type to `types/canvas.ts` and an `upsertAndPrune<X>(courseId, rows, tx)` to `graph.ts` following the full-list + prune pattern.
+4. Add the kind to `CollectionKind` + `DEFAULT_FRESHNESS` in `freshness.ts`, the Settings field list, and a `CollectionSpec` in `collections.ts` (fetch → shape → `withTransaction(upsert)`; add a `probe` if Canvas offers a narrow change check).
+5. Add a read function to `graph.ts` and expose it through a tool in `agent/tools.ts` (which must `ensureCollection` first), and in the Graph Explorer if useful.
