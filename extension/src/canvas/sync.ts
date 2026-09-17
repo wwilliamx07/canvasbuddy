@@ -1,26 +1,10 @@
 import type { AppSettings } from '../components/Settings/Settings';
-import type {
-  CanvasCourse,
-  CanvasModule,
-  CanvasModuleItem,
-  CanvasAssignment,
-  CanvasFile,
-  CanvasPage,
-} from '../types/canvas';
+import type { CanvasAssignment, CanvasFile, CanvasPage } from '../types/canvas';
+import { setAssignmentDescription } from '../db/graph';
 import {
-  upsertCourses,
-  upsertAndPruneModules,
-  upsertAndPruneModuleItems,
-  upsertAndPruneAssignments,
-  upsertAndPrunePages,
-  markCollectionSynced,
-  getCollectionAgeHours,
-  type SyncCollection,
-} from '../db/graph';
-import {
+  docIdFor,
   getDocumentCacheState,
   storeChunksWithEmbeddings,
-  upsertAndPruneKnownFiles,
   type DocumentSourceType,
 } from '../db/rag';
 import { getDB } from '../db/pglite';
@@ -31,182 +15,12 @@ import {
   htmlToText,
   type StructuredPage,
 } from '../utils/textExtractor';
-
-const CANVAS_BASE = 'https://q.utoronto.ca/api/v1';
-
-/**
- * Fetches every page of a paginated Canvas list endpoint by following the
- * `Link: <...>; rel="next"` header. The sync functions prune anything not in the
- * result set, so returning a partial list would delete real data.
- */
-async function fetchAllPages<T>(url: string, label: string): Promise<T[]> {
-  const all: T[] = [];
-  let next: string | null = url;
-  let guard = 0;
-
-  while (next && guard++ < 100) {
-    const response: Response = await fetch(next, { credentials: 'include' });
-    if (!response.ok) {
-      throw new Error(`Failed to fetch ${label} from Canvas: ${response.status} ${response.statusText}`);
-    }
-    const page: unknown = await response.json();
-    if (!Array.isArray(page)) {
-      throw new Error(`Unexpected ${label} response format from Canvas`);
-    }
-    all.push(...(page as T[]));
-    next = parseNextLink(response.headers.get('Link'));
-  }
-
-  return all;
-}
-
-function parseNextLink(linkHeader: string | null): string | null {
-  if (!linkHeader) return null;
-  for (const part of linkHeader.split(',')) {
-    const match = part.match(/<([^>]+)>;\s*rel="next"/);
-    if (match) return match[1];
-  }
-  return null;
-}
+import { CanvasHttpError, canvasGet } from './http';
 
 /**
- * Sync active courses from Canvas into local PGlite graph
+ * Just-in-time document indexing (files, wiki pages, assignment descriptions).
+ * Collection syncs live in ./collections.ts; inbox threads are indexed there as part of the sync.
  */
-export async function syncCourses(): Promise<{ count: number; courses: CanvasCourse[] }> {
-  const data = await fetchAllPages<CanvasCourse>(
-    `${CANVAS_BASE}/courses?per_page=100&enrollment_state=active&include[]=term`,
-    'courses'
-  );
-  const validCourses = data.filter((c) => c && c.id && c.name);
-
-  const count = await upsertCourses(validCourses);
-  return { count, courses: validCourses };
-}
-
-/**
- * Sync modules and their module items for a specific course, pruning deleted items
- */
-export async function syncCourseModules(
-  courseId: string
-): Promise<{ modulesUpserted: number; modulesPruned: number; itemsUpserted: number }> {
-  const modules = await fetchAllPages<CanvasModule>(
-    `${CANVAS_BASE}/courses/${courseId}/modules?per_page=100&include[]=items`,
-    `modules for course ${courseId}`
-  );
-
-  // 1. Upsert and prune modules
-  const moduleResult = await upsertAndPruneModules(courseId, modules);
-
-  // 2. Upsert and prune items for each module. Canvas omits inline `items` for
-  //    large modules, so fall back to the items endpoint in that case.
-  let totalItemsUpserted = 0;
-  for (const m of modules) {
-    const itemResult = Array.isArray(m.items)
-      ? await upsertAndPruneModuleItems(String(m.id), m.items)
-      : await syncModuleItems(courseId, String(m.id));
-    totalItemsUpserted += itemResult.upserted;
-  }
-
-  await markCollectionSynced(courseId, 'modules');
-
-  return {
-    modulesUpserted: moduleResult.upserted,
-    modulesPruned: moduleResult.pruned,
-    itemsUpserted: totalItemsUpserted,
-  };
-}
-
-/**
- * Sync items for a specific module
- */
-export async function syncModuleItems(
-  courseId: string,
-  moduleId: string
-): Promise<{ upserted: number; pruned: number }> {
-  const items = await fetchAllPages<CanvasModuleItem>(
-    `${CANVAS_BASE}/courses/${courseId}/modules/${moduleId}/items?per_page=100`,
-    `items for module ${moduleId}`
-  );
-
-  return upsertAndPruneModuleItems(moduleId, items);
-}
-
-/**
- * Sync assignments for a course, pruning deleted assignments
- */
-export async function syncCourseAssignments(
-  courseId: string
-): Promise<{ upserted: number; pruned: number }> {
-  const assignments = await fetchAllPages<CanvasAssignment>(
-    `${CANVAS_BASE}/courses/${courseId}/assignments?per_page=100`,
-    `assignments for course ${courseId}`
-  );
-
-  const result = await upsertAndPruneAssignments(courseId, assignments);
-  await markCollectionSynced(courseId, 'assignments');
-  return result;
-}
-
-/**
- * Sync the course's Files list (metadata only, nothing is downloaded). Makes files that are
- * not placed in any module discoverable and indexable.
- */
-export async function syncCourseFiles(courseId: string): Promise<{ upserted: number; pruned: number }> {
-  const files = await fetchAllPages<CanvasFile>(
-    `${CANVAS_BASE}/courses/${courseId}/files?per_page=100&sort=updated_at&order=desc`,
-    `files for course ${courseId}`
-  );
-
-  const result = await upsertAndPruneKnownFiles(courseId, files);
-  await markCollectionSynced(courseId, 'files');
-  return result;
-}
-
-/**
- * Sync the course's wiki pages (titles only; bodies are fetched when a page is indexed).
- */
-export async function syncCoursePages(courseId: string): Promise<{ upserted: number; pruned: number }> {
-  const pages = await fetchAllPages<CanvasPage>(
-    `${CANVAS_BASE}/courses/${courseId}/pages?per_page=100&published=true`,
-    `pages for course ${courseId}`
-  );
-
-  const result = await upsertAndPrunePages(courseId, pages);
-  await markCollectionSynced(courseId, 'pages');
-  return result;
-}
-
-/**
- * Deterministic staleness rule: re-sync a collection if it has never been synced for this
- * course or is older than `maxAgeHours`. Used for time-sensitive data (due dates) so freshness
- * does not depend on the model noticing a timestamp.
- */
-export async function ensureFresh(
-  courseId: string,
-  collection: SyncCollection,
-  maxAgeHours: number
-): Promise<{ refreshed: boolean; ageHours: number | null }> {
-  const ageHours = await getCollectionAgeHours(courseId, collection);
-  if (ageHours != null && ageHours < maxAgeHours) {
-    return { refreshed: false, ageHours };
-  }
-
-  switch (collection) {
-    case 'modules':
-      await syncCourseModules(courseId);
-      break;
-    case 'assignments':
-      await syncCourseAssignments(courseId);
-      break;
-    case 'files':
-      await syncCourseFiles(courseId);
-      break;
-    case 'pages':
-      await syncCoursePages(courseId);
-      break;
-  }
-  return { refreshed: true, ageHours };
-}
 
 export interface IndexTarget {
   sourceType: DocumentSourceType;
@@ -294,15 +108,6 @@ export async function indexDocumentJustInTime(target: IndexTarget, settings: App
 }
 
 /** Backward-compatible wrapper for Canvas files */
-export async function indexFileJustInTime(
-  fileId: string,
-  courseId: string | undefined | null,
-  settings: AppSettings
-): Promise<{ status: 'cached' | 'indexed'; filename: string; chunksCount: number }> {
-  const res = await indexDocumentJustInTime({ sourceType: 'file', sourceId: fileId, courseId }, settings);
-  return { status: res.status, filename: res.title, chunksCount: res.chunksCount };
-}
-
 interface DocumentSource {
   docId: string;
   title: string;
@@ -314,6 +119,31 @@ interface DocumentSource {
 }
 
 /**
+ * File metadata, trying the course-scoped endpoint first (the URL Canvas itself attaches to
+ * module items) and the global one second. A 403 here is a Canvas permission decision about
+ * this specific file, so the error says what usually causes it.
+ */
+export async function fetchFileMetadata(fileId: string, courseId?: string | null): Promise<CanvasFile & { url?: string; locked_for_user?: boolean; lock_explanation?: string }> {
+  const paths = courseId ? [`/courses/${courseId}/files/${fileId}`, `/files/${fileId}`] : [`/files/${fileId}`];
+  let last: unknown = null;
+  for (const path of paths) {
+    try {
+      return await canvasGet(path, `file ${fileId}`);
+    } catch (e) {
+      last = e;
+      if (!(e instanceof CanvasHttpError) || (e.status !== 403 && e.status !== 404)) throw e;
+    }
+  }
+  if (last instanceof CanvasHttpError && last.status === 403) {
+    throw new Error(
+      `Canvas denied access to file ${fileId} (403). This usually means the file is in a locked module ` +
+        `(prerequisites or unlock date), in a locked/hidden folder, or unpublished. Tell the user which file and why.`
+    );
+  }
+  throw last;
+}
+
+/**
  * Resolves metadata for a document and a lazy loader for its text, per source type.
  * Metadata is fetched eagerly so the cache check can happen before any download.
  */
@@ -321,25 +151,22 @@ async function loadDocumentSource(target: IndexTarget): Promise<DocumentSource> 
   const { sourceType, sourceId, courseId } = target;
 
   if (sourceType === 'file') {
-    const metaRes = await fetch(`${CANVAS_BASE}/files/${sourceId}`, { credentials: 'include' });
-    if (!metaRes.ok) {
-      throw new Error(`Failed to get file metadata for ${sourceId}: ${metaRes.status} ${metaRes.statusText}`);
-    }
-    const meta = await metaRes.json();
+    const meta = await fetchFileMetadata(sourceId, courseId);
     const filename: string = meta.filename || meta.display_name || `file_${sourceId}`;
 
     return {
-      docId: String(sourceId),
+      docId: docIdFor('file', sourceId),
       title: filename,
       displayName: meta.display_name || filename,
       version: meta.modified_at || meta.updated_at || String(meta.size || '1'),
       htmlUrl: meta.url || null,
       loadPages: async () => {
-        let downloadUrl: string = meta.url;
-        const urlRes = await fetch(`${CANVAS_BASE}/files/${sourceId}/public_url`, { credentials: 'include' });
-        if (urlRes.ok) {
-          const urlData = await urlRes.json();
+        let downloadUrl: string | undefined = meta.url;
+        try {
+          const urlData = await canvasGet<{ public_url?: string }>(`/files/${sourceId}/public_url`, `download URL for file ${sourceId}`);
           if (urlData.public_url) downloadUrl = urlData.public_url;
+        } catch {
+          // fall back to the metadata url
         }
         if (!downloadUrl) {
           throw new Error(`Unable to obtain download URL for file ${sourceId}`);
@@ -355,15 +182,12 @@ async function loadDocumentSource(target: IndexTarget): Promise<DocumentSource> 
 
   if (sourceType === 'page') {
     if (!courseId) throw new Error('course_id is required to index a page');
-    const res = await fetch(`${CANVAS_BASE}/courses/${courseId}/pages/${encodeURIComponent(sourceId)}`, {
-      credentials: 'include',
-    });
-    if (!res.ok) {
-      throw new Error(`Failed to fetch page "${sourceId}" in course ${courseId}: ${res.status} ${res.statusText}`);
-    }
-    const page: CanvasPage = await res.json();
+    const page = await canvasGet<CanvasPage>(
+      `/courses/${courseId}/pages/${encodeURIComponent(sourceId)}`,
+      `page "${sourceId}" in course ${courseId}`
+    );
     return {
-      docId: `page:${courseId}:${sourceId}`,
+      docId: docIdFor('page', sourceId, courseId),
       title: page.title || sourceId,
       version: page.updated_at || '1',
       htmlUrl: page.html_url || null,
@@ -377,13 +201,9 @@ async function loadDocumentSource(target: IndexTarget): Promise<DocumentSource> 
 
   if (sourceType === 'assignment') {
     if (!courseId) throw new Error('course_id is required to index an assignment description');
-    const res = await fetch(`${CANVAS_BASE}/courses/${courseId}/assignments/${sourceId}`, { credentials: 'include' });
-    if (!res.ok) {
-      throw new Error(`Failed to fetch assignment ${sourceId}: ${res.status} ${res.statusText}`);
-    }
-    const a: CanvasAssignment = await res.json();
+    const a = await fetchAssignmentWithDescription(courseId, sourceId);
     return {
-      docId: `assignment:${sourceId}`,
+      docId: docIdFor('assignment', sourceId),
       title: a.name ? `${a.name} (assignment description)` : `Assignment ${sourceId}`,
       version: a.updated_at || '1',
       htmlUrl: a.html_url || null,
@@ -395,7 +215,21 @@ async function loadDocumentSource(target: IndexTarget): Promise<DocumentSource> 
     };
   }
 
+  if (sourceType === 'conversation') {
+    throw new Error('Inbox threads are indexed automatically when the inbox is synced; call get_inbox first.');
+  }
+
   throw new Error(`Unsupported source type: ${sourceType}`);
+}
+
+/**
+ * Fetches one assignment (the only listing that carries `description`) and caches the
+ * description in the graph so get_assignment / indexing do not fetch it twice.
+ */
+export async function fetchAssignmentWithDescription(courseId: string, assignmentId: string): Promise<CanvasAssignment> {
+  const a = await canvasGet<CanvasAssignment>(`/courses/${courseId}/assignments/${assignmentId}`, `assignment ${assignmentId}`);
+  await setAssignmentDescription(String(assignmentId), a.description ?? null, a.updated_at ?? null);
+  return a;
 }
 
 /**

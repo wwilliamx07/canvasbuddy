@@ -42,6 +42,8 @@ CREATE TABLE IF NOT EXISTS module_items (
 );
 
 -- 5. Assignments Table
+--    Synced from the compact assignment_groups listing (no description). The description is
+--    fetched lazily by get_assignment / indexing and cached while description_version = updated_at.
 CREATE TABLE IF NOT EXISTS assignments (
   assignment_id   TEXT PRIMARY KEY,
   course_id       TEXT REFERENCES courses(course_id) ON DELETE CASCADE,
@@ -51,7 +53,83 @@ CREATE TABLE IF NOT EXISTS assignments (
   html_url        TEXT,
   description     TEXT,          -- raw HTML from Canvas; indexed on demand
   updated_at      TEXT,
+  synced_at       TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+  submission_types TEXT,         -- comma-joined
+  group_name       TEXT,
+  description_version TEXT       -- updated_at at the time description was fetched
+);
+
+-- 5a. The student's own submission state per assignment (shaped at store time)
+CREATE TABLE IF NOT EXISTS submissions (
+  assignment_id  TEXT PRIMARY KEY,
+  course_id      TEXT REFERENCES courses(course_id) ON DELETE CASCADE,
+  workflow_state TEXT,           -- unsubmitted | submitted | graded | pending_review
+  submitted_at   TIMESTAMPTZ,
+  graded_at      TIMESTAMPTZ,
+  score          NUMERIC,
+  grade          TEXT,
+  late           BOOLEAN,
+  missing        BOOLEAN,
+  excused        BOOLEAN,
+  synced_at      TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 5c. Announcements (HTML already converted to text)
+CREATE TABLE IF NOT EXISTS announcements (
+  announcement_id TEXT PRIMARY KEY,
+  course_id       TEXT REFERENCES courses(course_id) ON DELETE CASCADE,
+  title           TEXT NOT NULL,
+  posted_at       TIMESTAMPTZ,
+  author          TEXT,
+  text            TEXT,
+  html_url        TEXT,
   synced_at       TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 5d. Planner window (cross-course to-do list; course_id has no FK because the planner may
+--     reference courses that are not in the graph)
+CREATE TABLE IF NOT EXISTS planner_items (
+  item_key       TEXT PRIMARY KEY,   -- '<plannable_type>:<plannable_id>'
+  plannable_type TEXT NOT NULL,
+  plannable_id   TEXT,
+  course_id      TEXT,
+  context_name   TEXT,
+  title          TEXT NOT NULL,
+  date           TIMESTAMPTZ,
+  points         NUMERIC,
+  submitted      BOOLEAN,
+  late           BOOLEAN,
+  missing        BOOLEAN,
+  graded         BOOLEAN,
+  new_activity   BOOLEAN,
+  html_url       TEXT,
+  synced_at      TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 5e. Inbox: conversation list + messages of threads that have been fetched
+CREATE TABLE IF NOT EXISTS conversations (
+  conversation_id TEXT PRIMARY KEY,
+  subject         TEXT,
+  context_name    TEXT,
+  course_id       TEXT,              -- no FK: may reference a course outside the graph
+  participants    TEXT,              -- JSON [{id, name}]
+  last_message    TEXT,
+  last_message_at TIMESTAMPTZ,
+  workflow_state  TEXT,              -- read | unread | archived
+  message_count   INT,
+  starred         BOOLEAN,
+  thread_synced_for TEXT,            -- last_message_at value the stored messages correspond to
+  synced_at       TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS messages (
+  message_id      TEXT PRIMARY KEY,
+  conversation_id TEXT REFERENCES conversations(conversation_id) ON DELETE CASCADE,
+  author_id       TEXT,
+  author_name     TEXT,
+  created_at      TIMESTAMPTZ,
+  body            TEXT NOT NULL,
+  body_tsv        TSVECTOR
 );
 
 -- 5b. Wiki Pages
@@ -107,6 +185,17 @@ CREATE TABLE IF NOT EXISTS file_chunks (
   content_tsv   TSVECTOR       -- full-text index for hybrid (keyword + vector) search
 );
 
+-- 9. Freshness state per scope ('courses', 'planner', 'inbox', 'course:<id>:<collection>').
+--    Owned by canvas/freshness.ts. status = 'ok' | 'unavailable' (course hides the collection).
+CREATE TABLE IF NOT EXISTS sync_state (
+  scope       TEXT PRIMARY KEY,
+  synced_at   TIMESTAMPTZ,
+  probed_at   TIMESTAMPTZ,
+  fingerprint TEXT,
+  status      TEXT NOT NULL DEFAULT 'ok',
+  error       TEXT
+);
+
 -- Migrations for databases created by earlier versions (all idempotent)
 ALTER TABLE courses     ADD COLUMN IF NOT EXISTS modules_synced_at     TIMESTAMPTZ;
 ALTER TABLE courses     ADD COLUMN IF NOT EXISTS assignments_synced_at TIMESTAMPTZ;
@@ -114,6 +203,11 @@ ALTER TABLE courses     ADD COLUMN IF NOT EXISTS files_synced_at       TIMESTAMP
 ALTER TABLE courses     ADD COLUMN IF NOT EXISTS pages_synced_at       TIMESTAMPTZ;
 ALTER TABLE assignments ADD COLUMN IF NOT EXISTS description TEXT;
 ALTER TABLE assignments ADD COLUMN IF NOT EXISTS updated_at  TEXT;
+ALTER TABLE assignments ADD COLUMN IF NOT EXISTS submission_types    TEXT;
+ALTER TABLE assignments ADD COLUMN IF NOT EXISTS group_name          TEXT;
+ALTER TABLE assignments ADD COLUMN IF NOT EXISTS description_version TEXT;
+-- Descriptions synced by earlier versions came from the full listing; treat them as current.
+UPDATE assignments SET description_version = updated_at WHERE description IS NOT NULL AND description_version IS NULL;
 ALTER TABLE files       ADD COLUMN IF NOT EXISTS source_type     TEXT DEFAULT 'file';
 ALTER TABLE files       ADD COLUMN IF NOT EXISTS embedding_model TEXT;
 ALTER TABLE files       ADD COLUMN IF NOT EXISTS html_url        TEXT;
@@ -122,6 +216,19 @@ ALTER TABLE files       ADD COLUMN IF NOT EXISTS size            BIGINT;
 ALTER TABLE files       ALTER COLUMN extracted_at DROP DEFAULT;
 ALTER TABLE file_chunks ADD COLUMN IF NOT EXISTS content_tsv TSVECTOR;
 UPDATE file_chunks SET content_tsv = to_tsvector('english', content) WHERE content_tsv IS NULL;
+
+-- Carry the legacy per-collection stamps on courses into sync_state (columns are kept, unused).
+INSERT INTO sync_state (scope, synced_at, probed_at)
+SELECT 'course:' || course_id || ':' || col, ts, ts FROM (
+  SELECT course_id, 'modules'     AS col, modules_synced_at     AS ts FROM courses UNION ALL
+  SELECT course_id, 'assignments',        assignments_synced_at        FROM courses UNION ALL
+  SELECT course_id, 'files',              files_synced_at              FROM courses UNION ALL
+  SELECT course_id, 'pages',              pages_synced_at              FROM courses
+) legacy WHERE ts IS NOT NULL
+ON CONFLICT (scope) DO NOTHING;
+INSERT INTO sync_state (scope, synced_at, probed_at)
+SELECT 'courses', MAX(synced_at), MAX(synced_at) FROM courses HAVING MAX(synced_at) IS NOT NULL
+ON CONFLICT (scope) DO NOTHING;
 
 -- Indexes for fast traversal and joins
 CREATE INDEX IF NOT EXISTS idx_modules_course ON modules(course_id);
@@ -134,5 +241,10 @@ CREATE INDEX IF NOT EXISTS idx_file_chunks_file ON file_chunks(file_id);
 CREATE INDEX IF NOT EXISTS idx_file_chunks_tsv ON file_chunks USING GIN(content_tsv);
 CREATE INDEX IF NOT EXISTS idx_files_course ON files(course_id);
 CREATE INDEX IF NOT EXISTS idx_pages_course ON pages(course_id);
+CREATE INDEX IF NOT EXISTS idx_submissions_course ON submissions(course_id);
+CREATE INDEX IF NOT EXISTS idx_announcements_course ON announcements(course_id, posted_at DESC);
+CREATE INDEX IF NOT EXISTS idx_planner_date ON planner_items(date);
+CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_messages_tsv ON messages USING GIN(body_tsv);
 `;
 

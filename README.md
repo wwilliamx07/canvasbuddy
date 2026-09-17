@@ -1,40 +1,48 @@
 # CanvasBuddy
 
-CanvasBuddy is your personal AI agent for the University of Toronto's quercus. CanvasBuddy can help you with all tasks related to quercus, from summarizing documents, to planning your week.
+CanvasBuddy is a personal AI agent for the University of Toronto's Quercus (Canvas). It runs entirely in a browser side panel — no backend — and answers questions about your courses, deadlines, documents, announcements and inbox using your own LLM API key.
 
 ## What it can do
 
-- List your active courses and course details
-- Show upcoming assignments, planner items, and assignment details
-- Browse course modules and module items
-- Check announcements and recent course activity
-- Review conversations/messages in Canvas
-- Extract text from PDF and PowerPoint files uploaded to Canvas
-- Keep multiple chat threads locally in the browser
-- Maintain a local knowledge graph of your courses (modules, items, assignments) that the agent explores first and re-syncs from Canvas when stale, pruning deleted items
-- Hybrid (keyword + semantic) search over course content: PDFs/slides, wiki pages, and assignment descriptions are chunked and embedded on demand into a client-side vector database, and answers cite the page or slide
-- Browse the graph in the **Graph** tab: inspect nodes, trigger syncs, and index files for search
+- Answer "what's due this week / what am I missing" from your planner across all courses
+- Find lectures, files and pages inside course modules; list assignments with due dates, points and your submission status or grade
+- Search inside PDFs, slides, wiki pages, assignment descriptions and inbox threads (semantic + keyword), citing the page or slide
+- Read specific pages/slides of a document, or a whole message thread, verbatim
+- Show recent announcements and inbox conversations
+- Keep multiple chat threads locally
+- Browse the local knowledge graph in the **Graph** tab: inspect courses, modules, items and indexed documents; force a refresh; index documents by hand
 
-## Technical Overview
+## How it works
 
-**Architecture:**
-- Browser extension (Manifest v3) for Chrome/Edge, opened as a side panel, integrated with Canvas (Quercus)
-- React 19 frontend with TypeScript, styled with Tailwind CSS
-- Supports Google AI (Gemini) and OpenAI APIs, with tool calling on both
-- Chats and settings persisted in localStorage; course graph and vector chunks in PGlite (Postgres compiled to WASM, with pgvector) stored in IndexedDB — no backend
-- Embeddings via `gemini-embedding-2` or `text-embedding-3-small` (768 dimensions, configurable in Settings)
-- Tools for Canvas API access, graph exploration/sync, PDF/PPTX/HTML extraction, and hybrid vector + full-text search
-- The system prompt carries a live summary of what is cached and how old it is, so the agent answers from the local graph and only calls Canvas for missing, stale, or uncached data (submissions, grades, announcements, messages)
+**One source of knowledge, kept current on demand.** All seven agent tools read a local copy of your Canvas data stored in PGlite (Postgres compiled to WASM, with pgvector, persisted in IndexedDB). Before a tool reads a collection, a freshness engine decides whether that collection is missing, stale, or unchanged:
 
-**Context Optimization:**
-- Context-size-based compression: older conversation segments are automatically summarized when context exceeds the configured token threshold
-- Tool-loop digests: model summarizes what it learned after each tool-call sequence
+- each collection has a max age (TTL) you can edit in **Settings → Freshness**;
+- within the TTL, collections that Canvas offers a cheap change check for (modules, announcements, inbox) are probed and updated only if something changed — e.g. only the modules whose item count moved are re-fetched, only inbox threads with a new message are re-read;
+- past the TTL a full sync runs, which also catches deletions;
+- collections a course hides from students (typically Files and Pages) are remembered as unavailable and not retried for a day.
 
-## Build:
+The model never chooses between "live" and "cached" data and has no staleness rules; the only cache-related parameter is `refresh`, reserved for when you say something changed.
+
+Documents are indexed just in time: the first question about a file downloads it, extracts text per page/slide, embeds it (768-d) and stores chunks with a full-text index; later questions hit the local index. Inbox messages are embedded once, incrementally, as they arrive.
+
+**Architecture**
+- Manifest V3 extension for Chrome/Edge, opened as a side panel; Canvas is reached with your existing login session (no Canvas token)
+- React 19 + TypeScript + Tailwind
+- Gemini or OpenAI (and OpenAI-compatible endpoints) for chat and embeddings, with real function-call turns on both
+- Chats and settings in localStorage; graph and vectors in PGlite/IndexedDB
+- Hybrid retrieval: pgvector cosine similarity fused with Postgres full-text search (reciprocal rank fusion)
+- Context management: tool turns are persisted (capped) and older turns are summarized into digests when the configured token threshold is exceeded; the system prompt and tool schemas form a stable, cacheable prefix
+
+For the full architecture reference see [`reference/`](reference/README.md). Agents and developers should read it before changing code (see `CLAUDE.md`).
+
+## Build
 
 ```bash
 cd extension
+npm install
 npm run build
 ```
 
-Then load `extension/dist` as an unpacked extension (chrome://extensions → Developer mode → Load unpacked). Click the toolbar icon to open the side panel.
+Then load `extension/dist` as an unpacked extension (chrome://extensions → Developer mode → Load unpacked), open a Quercus tab so you are logged in, and click the toolbar icon to open the side panel. Enter your Gemini or OpenAI key in **Settings**.
+
+Type-check with `npx tsc -p tsconfig.app.json --noEmit` from `extension/`.

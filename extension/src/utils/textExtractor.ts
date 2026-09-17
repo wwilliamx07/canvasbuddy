@@ -128,30 +128,6 @@ export async function extractStructuredFromFile(
 }
 
 /**
- * Extract single flat string from a file (backward compatibility)
- */
-export async function extractTextFromFile(fileBuffer: ArrayBuffer | Uint8Array, fileName: string): Promise<string> {
-  const pages = await extractStructuredFromFile(fileBuffer, fileName);
-  return pages.map((p) => p.text).join('\n');
-}
-
-/**
- * Backward compatibility wrapper for PDF
- */
-export async function extractTextFromPDF(fileBuffer: ArrayBuffer | Uint8Array): Promise<string> {
-  const pages = await extractStructuredFromPDF(fileBuffer);
-  return pages.map((p) => p.text).join('\n');
-}
-
-/**
- * Backward compatibility wrapper for PPTX
- */
-export async function extractTextFromPPTX(fileBuffer: ArrayBuffer | Uint8Array): Promise<string> {
-  const pages = await extractStructuredFromPPTX(fileBuffer);
-  return pages.map((p) => p.text).join('\n');
-}
-
-/**
  * Chunk a structured document into semantically sized pieces preserving page/slide numbers
  */
 export function chunkStructuredDocument(

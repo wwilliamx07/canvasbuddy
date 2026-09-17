@@ -55,6 +55,8 @@ export interface CanvasAssignment {
   submission_types?: string[];
   updated_at?: string;
   synced_at?: string;
+  /** Set by the assignment_groups listing (not a Canvas field on the assignment itself) */
+  group_name?: string;
 }
 
 export interface CanvasPage {
@@ -83,15 +85,6 @@ export interface CanvasFile {
   extracted_at?: string;
 }
 
-export interface GraphEdge {
-  edge_id?: number;
-  from_type: 'course' | 'module' | 'module_item' | 'assignment' | 'file';
-  from_id: string;
-  to_type: 'course' | 'module' | 'module_item' | 'assignment' | 'file';
-  to_id: string;
-  relation: 'contains' | 'prerequisite' | 'references';
-}
-
 export interface GraphStats {
   courseCount: number;
   moduleCount: number;
@@ -117,3 +110,66 @@ export interface RetrievedChunk {
   html_url?: string;
 }
 
+
+// ---------------------------------------------------------------------------
+// Shaped rows: what collections store (and what tools return). Nothing raw from Canvas.
+// ---------------------------------------------------------------------------
+
+export interface ShapedSubmission {
+  assignment_id: string;
+  workflow_state: string | null;
+  submitted_at: string | null;
+  graded_at: string | null;
+  score: number | null;
+  grade: string | null;
+  late: boolean;
+  missing: boolean;
+  excused: boolean;
+}
+
+export interface ShapedAnnouncement {
+  announcement_id: string;
+  title: string;
+  posted_at: string | null;
+  author: string | null;
+  text: string;
+  html_url: string | null;
+}
+
+export interface ShapedPlannerItem {
+  item_key: string;
+  plannable_type: string;
+  plannable_id: string | null;
+  course_id: string | null;
+  context_name: string | null;
+  title: string;
+  date: string | null;
+  points: number | null;
+  submitted: boolean | null;
+  late: boolean | null;
+  missing: boolean | null;
+  graded: boolean | null;
+  new_activity: boolean;
+  html_url: string | null;
+}
+
+export interface ShapedConversation {
+  conversation_id: string;
+  subject: string | null;
+  context_name: string | null;
+  course_id: string | null;
+  participants: Array<{ id: string; name: string }>;
+  last_message: string | null;
+  last_message_at: string | null;
+  workflow_state: string | null;
+  message_count: number | null;
+  starred: boolean;
+}
+
+export interface ShapedMessage {
+  message_id: string;
+  author_id: string | null;
+  author_name: string | null;
+  created_at: string | null;
+  body: string;
+}

@@ -1,6 +1,23 @@
-import { PGlite } from '@electric-sql/pglite';
+import { PGlite, type Transaction } from '@electric-sql/pglite';
 import { vector } from '@electric-sql/pglite-pgvector';
 import { SCHEMA_SQL } from './schema';
+
+/** Anything that can run a parameterized query: the database itself or an open transaction. */
+export type Queryable = Pick<Transaction, 'query'>;
+
+/**
+ * Runs `fn` inside one transaction so a multi-statement sync is all-or-nothing and the
+ * IndexedDB VFS flushes once instead of per statement.
+ */
+export async function withTransaction<T>(fn: (tx: Transaction) => Promise<T>): Promise<T> {
+  const db = await getDB();
+  return db.transaction(fn);
+}
+
+/** The db, or the transaction when one is being threaded through. */
+export async function q(tx?: Queryable): Promise<Queryable> {
+  return tx ?? (await getDB());
+}
 
 let dbInstance: PGlite | null = null;
 let dbInitPromise: Promise<PGlite> | null = null;
@@ -73,3 +90,8 @@ export async function getDB(): Promise<PGlite> {
   return dbInitPromise;
 }
 
+
+/** Test hook: inject an already-open instance (Node smoke tests); never used by the extension. */
+export function __setTestDb(db: PGlite): void {
+  dbInstance = db;
+}

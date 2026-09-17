@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { Eye, EyeOff } from 'lucide-react';
+import { DEFAULT_FRESHNESS, type FreshnessSettings } from '../../canvas/freshness';
 
 export interface AppSettings {
   apiKey: string;
@@ -8,6 +9,28 @@ export interface AppSettings {
   embeddingModel?: string;
   llmProvider: 'openai' | 'google';
   contextThreshold: number;
+  /** Per-collection max ages in minutes; missing keys fall back to DEFAULT_FRESHNESS. */
+  freshness?: Partial<FreshnessSettings>;
+}
+
+const FRESHNESS_FIELDS: Array<{ key: keyof FreshnessSettings; label: string; hint: string }> = [
+  { key: 'courses', label: 'Courses', hint: 'enrolled course list' },
+  { key: 'modules', label: 'Modules & items', hint: 'course structure' },
+  { key: 'assignments', label: 'Assignments', hint: 'names, due dates, points' },
+  { key: 'files', label: 'Files', hint: 'course Files list' },
+  { key: 'pages', label: 'Pages', hint: 'wiki page list' },
+  { key: 'submissions', label: 'Submissions', hint: 'your grades & submission status' },
+  { key: 'announcements', label: 'Announcements', hint: '' },
+  { key: 'planner', label: 'Planner', hint: 'cross-course to-do window' },
+  { key: 'inbox', label: 'Inbox', hint: 'conversations & messages' },
+  { key: 'probeDebounce', label: 'Probe debounce', hint: 'skip re-checking a collection checked this recently' },
+  { key: 'unavailableRetry', label: 'Unavailable retry', hint: 'how long to remember a course hides a collection' },
+];
+
+function formatMinutes(min: number): string {
+  if (min % (24 * 60) === 0) return `${min / (24 * 60)} d`;
+  if (min % 60 === 0) return `${min / 60} h`;
+  return `${min} min`;
 }
 
 interface SettingsProps {
@@ -24,11 +47,18 @@ export const Settings: React.FC<SettingsProps> = ({ settings, onSettingsChange, 
     setForm(settings);
   }, [settings]);
 
-  const handleChange = (field: keyof AppSettings, value: string | number) => {
+  const handleChange = (field: keyof AppSettings, value: AppSettings[keyof AppSettings]) => {
     const updated = { ...form, [field]: value };
     setForm(updated);
     // Auto-save immediately on any change to persist settings
     onSettingsChange(updated);
+  };
+
+  const freshness: FreshnessSettings = { ...DEFAULT_FRESHNESS, ...(form.freshness || {}) };
+  const handleFreshnessChange = (key: keyof FreshnessSettings, raw: string) => {
+    const parsed = Number(raw);
+    if (!Number.isFinite(parsed) || parsed < 0) return;
+    handleChange('freshness', { ...freshness, [key]: Math.floor(parsed) });
   };
 
 
@@ -37,7 +67,7 @@ export const Settings: React.FC<SettingsProps> = ({ settings, onSettingsChange, 
   };
 
   return (
-    <div className="flex-1 flex flex-col h-full bg-gray-50 p-6">
+    <div className="flex-1 flex flex-col h-full bg-gray-50 p-6 overflow-y-auto min-h-0">
       <h1 className="text-3xl font-bold text-gray-900 mb-6">Settings</h1>
 
       <div className="max-w-2xl space-y-6">
@@ -185,6 +215,43 @@ export const Settings: React.FC<SettingsProps> = ({ settings, onSettingsChange, 
                 style={{ width: `${Math.min(100, (currentContextTokens / Math.max(form.contextThreshold, 1)) * 100)}%` }}
               />
             </div>
+          </div>
+        </div>
+
+        {/* Freshness */}
+        <div className="pt-2 border-t border-gray-200 space-y-3">
+          <div className="flex items-center justify-between">
+            <div>
+              <label className="block text-sm font-semibold text-gray-800">Freshness (minutes)</label>
+              <p className="text-xs text-gray-500 mt-1">
+                Maximum age of each cached collection before it is re-synced from Canvas. Where Canvas offers a
+                cheap change check, it runs within this window and syncs early if something changed.
+              </p>
+            </div>
+            <button
+              onClick={() => handleChange('freshness', { ...DEFAULT_FRESHNESS })}
+              className="px-3 py-1.5 text-xs bg-gray-200 hover:bg-gray-300 text-gray-800 rounded-lg font-medium transition-colors whitespace-nowrap"
+            >
+              Reset to defaults
+            </button>
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-3">
+            {FRESHNESS_FIELDS.map(({ key, label, hint }) => (
+              <div key={key} className="flex items-center gap-3">
+                <div className="flex-1 min-w-0">
+                  <div className="text-sm text-gray-800">{label}</div>
+                  {hint && <div className="text-xs text-gray-500 truncate">{hint}</div>}
+                </div>
+                <input
+                  type="number"
+                  min={0}
+                  value={freshness[key]}
+                  onChange={(e) => handleFreshnessChange(key, e.target.value)}
+                  className="w-24 px-2 py-1 border border-gray-300 rounded-lg text-sm focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-200"
+                />
+                <span className="w-12 text-xs text-gray-500 text-right">{formatMinutes(freshness[key])}</span>
+              </div>
+            ))}
           </div>
         </div>
 

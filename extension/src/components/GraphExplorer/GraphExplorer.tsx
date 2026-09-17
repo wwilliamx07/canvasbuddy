@@ -19,16 +19,25 @@ import {
 import type { AppSettings } from '../Settings/Settings';
 import type { CanvasCourse, GraphStats } from '../../types/canvas';
 import { exploreGraph, getGraphStatistics } from '../../db/graph';
-import { getFilesList, getFileChunks } from '../../db/rag';
-import {
-  syncCourses,
-  syncCourseModules,
-  syncCourseAssignments,
-  syncCourseFiles,
-  syncCoursePages,
-  indexDocumentJustInTime,
-  type IndexTarget,
-} from '../../canvas/sync';
+import { getFilesList, getFileChunks, docIdFor } from '../../db/rag';
+import { indexDocumentJustInTime, type IndexTarget } from '../../canvas/sync';
+import { ensureCollection, ensureCollections } from '../../canvas/collections';
+import type { EnsureResult } from '../../canvas/freshness';
+
+/** "Updated modules, assignments · unavailable: files, pages · failed: …" */
+function summarizeEnsure(results: EnsureResult[]): string {
+  const by = (status: EnsureResult['status']) => results.filter((r) => r.status === status).map((r) => r.kind);
+  const parts: string[] = [];
+  const synced = by('synced');
+  const fresh = by('fresh');
+  const unavailable = by('unavailable');
+  const errors = results.filter((r) => r.status === 'error');
+  if (synced.length) parts.push(`Updated ${synced.join(', ')}`);
+  if (fresh.length) parts.push(`already current: ${fresh.join(', ')}`);
+  if (unavailable.length) parts.push(`not available in this course: ${unavailable.join(', ')}`);
+  if (errors.length) parts.push(`failed: ${errors.map((r) => `${r.kind} (${r.error})`).join('; ')}`);
+  return parts.join(' · ') || 'Nothing to do.';
+}
 
 /**
  * Which local document (row in `files`) a selected node corresponds to, and how to index it.
@@ -38,23 +47,23 @@ function indexTargetFor(node: any, courseId: string | null): { docId: string; ta
   if (!node) return null;
   if (node.node_type === 'assignment' || node.assignment_id) {
     const id = String(node.assignment_id);
-    return { docId: `assignment:${id}`, target: { sourceType: 'assignment', sourceId: id, courseId } };
+    return { docId: docIdFor('assignment', id), target: { sourceType: 'assignment', sourceId: id, courseId } };
   }
   if (node.node_type === 'page' || node.page_url) {
     const slug = String(node.page_url);
-    return { docId: `page:${courseId}:${slug}`, target: { sourceType: 'page', sourceId: slug, courseId } };
+    return { docId: docIdFor('page', slug, courseId), target: { sourceType: 'page', sourceId: slug, courseId } };
   }
   if (node.item_type === 'File' && node.content_ref) {
     const id = String(node.content_ref);
-    return { docId: id, target: { sourceType: 'file', sourceId: id, courseId } };
+    return { docId: docIdFor('file', id), target: { sourceType: 'file', sourceId: id, courseId } };
   }
   if (node.item_type === 'Page' && node.content_ref) {
     const slug = String(node.content_ref);
-    return { docId: `page:${courseId}:${slug}`, target: { sourceType: 'page', sourceId: slug, courseId } };
+    return { docId: docIdFor('page', slug, courseId), target: { sourceType: 'page', sourceId: slug, courseId } };
   }
   if (node.node_type === 'file' || node.file_id) {
     const id = String(node.file_id);
-    return { docId: id, target: { sourceType: 'file', sourceId: id, courseId } };
+    return { docId: docIdFor('file', id), target: { sourceType: 'file', sourceId: id, courseId } };
   }
   return null;
 }
@@ -147,13 +156,13 @@ export const GraphExplorer: React.FC<GraphExplorerProps> = ({ settings }) => {
     }
   }, [selectedNode, selectedCourseId]);
 
-  // Manual Sync All Courses
+  // Manual Sync All Courses (forces a refresh regardless of TTL)
   const handleSyncAllCourses = async () => {
     setIsSyncing(true);
     setSyncStatusMsg('Fetching active courses from Canvas...');
     try {
-      const res = await syncCourses();
-      setSyncStatusMsg(`Successfully synced ${res.count} courses!`);
+      const res = await ensureCollection('courses', {}, { settings, refresh: true });
+      setSyncStatusMsg(summarizeEnsure([res]));
       await loadData();
     } catch (err: any) {
       setSyncStatusMsg(`Error: ${err.message}`);
@@ -163,18 +172,19 @@ export const GraphExplorer: React.FC<GraphExplorerProps> = ({ settings }) => {
     }
   };
 
-  // Manual Sync Course Modules & Assignments
+  // Manual refresh of every collection of the selected course. Collections the course hides
+  // (403/404) are reported, not fatal.
   const handleSyncCurrentCourse = async () => {
     if (!selectedCourseId) return;
     setIsSyncing(true);
     setSyncStatusMsg('Refreshing modules, assignments, files and pages...');
     try {
-      // Sequential: PGlite is a single connection and Canvas rate-limits bursts
-      await syncCourseModules(selectedCourseId);
-      await syncCourseAssignments(selectedCourseId);
-      await syncCourseFiles(selectedCourseId);
-      await syncCoursePages(selectedCourseId);
-      setSyncStatusMsg('Course structure updated and pruned successfully!');
+      const results = await ensureCollections(
+        ['modules', 'assignments', 'files', 'pages'],
+        { courseId: selectedCourseId },
+        { settings, refresh: true }
+      );
+      setSyncStatusMsg(summarizeEnsure(results));
       await loadData();
       const [updated, pages] = await Promise.all([
         exploreGraph({ entity_type: 'full_hierarchy', course_id: selectedCourseId }),

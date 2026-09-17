@@ -15,12 +15,6 @@ interface ChatUIProps {
   isLoading?: boolean;
 }
 
-// Function to strip tool calls from message content for display
-function stripToolCalls(content: string): string {
-  // Remove <tool_call ...> tags
-  return content.replace(/<tool_call\s+[^>]*>/g, '').trim();
-}
-
 export const ChatUI: React.FC<ChatUIProps> = ({ messages, onSendMessage, isLoading = false }) => {
   const [inputValue, setInputValue] = useState('');
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -68,7 +62,7 @@ export const ChatUI: React.FC<ChatUIProps> = ({ messages, onSendMessage, isLoadi
                   <div
                     className="prose prose-sm max-w-none dark:prose-invert break-words [&_*]:break-words [&_code]:break-all [&_pre]:overflow-x-auto"
                     dangerouslySetInnerHTML={{
-                      __html: marked(stripToolCalls(message.content)) as string,
+                      __html: marked(message.content) as string,
                     }}
                   />
                 ) : (
