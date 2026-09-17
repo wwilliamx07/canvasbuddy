@@ -1,5 +1,5 @@
 import React from 'react';
-import { MessageCircle, Settings, Trash2, Plus } from 'lucide-react';
+import { MessageCircle, Settings, Trash2, Plus, Network } from 'lucide-react';
 
 interface Chat {
   id: string;
@@ -8,8 +8,8 @@ interface Chat {
 }
 
 interface NavigationProps {
-  activeTab: 'chat' | 'settings';
-  onTabChange: (tab: 'chat' | 'settings') => void;
+  activeTab: 'chat' | 'graph' | 'settings';
+  onTabChange: (tab: 'chat' | 'graph' | 'settings') => void;
   chats: Chat[];
   currentChatId: string | null;
   onSelectChat: (chatId: string) => void;
@@ -48,6 +48,18 @@ export const Navigation: React.FC<NavigationProps> = ({
         >
           <MessageCircle size={20} />
           <span className="font-medium">Chat</span>
+        </button>
+
+        <button
+          onClick={() => onTabChange('graph')}
+          className={`flex items-center gap-3 px-4 py-3 rounded-lg transition-all duration-200 ${
+            activeTab === 'graph'
+              ? 'bg-blue-500 text-white'
+              : 'text-slate-300 hover:bg-slate-700'
+          }`}
+        >
+          <Network size={20} />
+          <span className="font-medium">Graph</span>
         </button>
 
         <button

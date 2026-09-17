@@ -7,70 +7,84 @@ import JSZip from 'jszip';
 // Set up the worker for PDF.js using the bundled worker URL
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl as unknown as string;
 
+export interface StructuredPage {
+  pageNumber: number;
+  text: string;
+}
+
+export interface DocumentChunk {
+  chunkIndex: number;
+  pageNumber?: number;
+  content: string;
+  tokenCount: number;
+}
+
 /**
- * Extract text from a PDF file
- * @param fileBuffer - Buffer or Uint8Array of the PDF file
- * @returns Promise<string> - Extracted text from the PDF
+ * Estimate token count using the standard ~4 chars per token rule
  */
-export async function extractTextFromPDF(fileBuffer: ArrayBuffer | Uint8Array): Promise<string> {
+export function estimateTokens(text: string): number {
+  if (!text || !text.trim()) return 0;
+  return Math.max(1, Math.ceil(text.length / 4));
+}
+
+/**
+ * Extract structured page-by-page text from a PDF file
+ */
+export async function extractStructuredFromPDF(fileBuffer: ArrayBuffer | Uint8Array): Promise<StructuredPage[]> {
   try {
     const pdf = await pdfjsLib.getDocument({ data: fileBuffer }).promise;
-    let text = '';
+    const pages: StructuredPage[] = [];
 
     for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
       const page = await pdf.getPage(pageNum);
       const textContent = await page.getTextContent();
       const pageText = textContent.items
         .map((item: any) => item.str)
-        .join(' ');
-      text += pageText + '\n';
+        .join(' ')
+        .trim();
+
+      if (pageText) {
+        pages.push({ pageNumber: pageNum, text: pageText });
+      }
     }
 
-    return text.trim();
+    return pages;
   } catch (error) {
     throw new Error(`Failed to extract text from PDF: ${(error as Error).message}`);
   }
 }
 
 /**
- * Extract text from a PPTX file (OpenXML format - ZIP archive)
- * @param fileBuffer - Buffer or Uint8Array of the PPTX file
- * @returns Promise<string> - Extracted text from the PPTX
+ * Extract structured slide-by-slide text from a PPTX file
  */
-export async function extractTextFromPPTX(fileBuffer: ArrayBuffer | Uint8Array): Promise<string> {
+export async function extractStructuredFromPPTX(fileBuffer: ArrayBuffer | Uint8Array): Promise<StructuredPage[]> {
   try {
-    // PPTX is a ZIP file, parse using jszip
     const zip = new JSZip();
     const unzipped = await zip.loadAsync(fileBuffer);
-    
-    let text = '';
+    const pages: StructuredPage[] = [];
 
     // Find and process all slide XML files
-    const slideFiles: { path: string; content: string }[] = [];
-    
+    const slideFiles: { path: string; content: string; slideNum: number }[] = [];
+
     for (const [path, file] of Object.entries(unzipped.files)) {
-      if (path.match(/^ppt\/slides\/slide\d+\.xml$/) && !file.dir) {
+      const match = path.match(/^ppt\/slides\/slide(\d+)\.xml$/);
+      if (match && !file.dir) {
         const content = await file.async('string');
-        slideFiles.push({ path, content });
+        slideFiles.push({ path, content, slideNum: parseInt(match[1], 10) });
       }
     }
 
-    // Sort slide files numerically
-    slideFiles.sort((a, b) => {
-      const numA = parseInt(a.path.match(/\d+/)![0]);
-      const numB = parseInt(b.path.match(/\d+/)![0]);
-      return numA - numB;
-    });
+    // Sort slides numerically
+    slideFiles.sort((a, b) => a.slideNum - b.slideNum);
 
-    // Extract text from each slide
-    for (const { content } of slideFiles) {
+    for (const { content, slideNum } of slideFiles) {
       const slideText = extractTextFromXml(content);
       if (slideText) {
-        text += slideText + '\n';
+        pages.push({ pageNumber: slideNum, text: slideText });
       }
     }
 
-    return text.trim();
+    return pages;
   } catch (error) {
     throw new Error(`Failed to extract text from PPTX: ${(error as Error).message}`);
   }
@@ -81,12 +95,10 @@ export async function extractTextFromPPTX(fileBuffer: ArrayBuffer | Uint8Array):
  */
 function extractTextFromXml(xml: string): string {
   let text = '';
-  
-  // Match all text within <a:t> tags (PowerPoint text elements)
   const textMatches = xml.match(/<a:t>([^<]*)<\/a:t>/g);
-  
+
   if (textMatches) {
-    textMatches.forEach(match => {
+    textMatches.forEach((match) => {
       const content = match.replace(/<\/?a:t>/g, '').trim();
       if (content) {
         text += content + ' ';
@@ -98,19 +110,114 @@ function extractTextFromXml(xml: string): string {
 }
 
 /**
- * Extract text from a file (PDF or PPTX)
- * @param fileBuffer - Buffer or Uint8Array of the file
- * @param fileName - Name of the file (used to determine file type)
- * @returns Promise<string> - Extracted text
+ * Extract structured page/slide text from either PDF or PPTX
  */
-export async function extractTextFromFile(fileBuffer: ArrayBuffer | Uint8Array, fileName: string): Promise<string> {
+export async function extractStructuredFromFile(
+  fileBuffer: ArrayBuffer | Uint8Array,
+  fileName: string
+): Promise<StructuredPage[]> {
   const fileExtension = fileName.toLowerCase().slice(fileName.lastIndexOf('.'));
 
   if (fileExtension === '.pdf') {
-    return extractTextFromPDF(fileBuffer);
+    return extractStructuredFromPDF(fileBuffer);
   } else if (fileExtension === '.pptx') {
-    return extractTextFromPPTX(fileBuffer);
+    return extractStructuredFromPPTX(fileBuffer);
   } else {
     throw new Error(`Unsupported file type: ${fileExtension}. Only PDF and PPTX files are supported.`);
   }
+}
+
+/**
+ * Extract single flat string from a file (backward compatibility)
+ */
+export async function extractTextFromFile(fileBuffer: ArrayBuffer | Uint8Array, fileName: string): Promise<string> {
+  const pages = await extractStructuredFromFile(fileBuffer, fileName);
+  return pages.map((p) => p.text).join('\n');
+}
+
+/**
+ * Backward compatibility wrapper for PDF
+ */
+export async function extractTextFromPDF(fileBuffer: ArrayBuffer | Uint8Array): Promise<string> {
+  const pages = await extractStructuredFromPDF(fileBuffer);
+  return pages.map((p) => p.text).join('\n');
+}
+
+/**
+ * Backward compatibility wrapper for PPTX
+ */
+export async function extractTextFromPPTX(fileBuffer: ArrayBuffer | Uint8Array): Promise<string> {
+  const pages = await extractStructuredFromPPTX(fileBuffer);
+  return pages.map((p) => p.text).join('\n');
+}
+
+/**
+ * Chunk a structured document into semantically sized pieces preserving page/slide numbers
+ */
+export function chunkStructuredDocument(
+  pages: StructuredPage[],
+  targetChunkTokens: number = 400,
+  overlapTokens: number = 50
+): DocumentChunk[] {
+  const chunks: DocumentChunk[] = [];
+  let chunkIndex = 0;
+
+  for (const page of pages) {
+    const pageTokens = estimateTokens(page.text);
+
+    // If page is reasonably sized (e.g. standard presentation slide or short page), keep as one chunk
+    if (pageTokens <= targetChunkTokens * 1.4) {
+      chunks.push({
+        chunkIndex: chunkIndex++,
+        pageNumber: page.pageNumber,
+        content: page.text,
+        tokenCount: pageTokens,
+      });
+      continue;
+    }
+
+    // Otherwise, split long page into overlapping token segments by sentences or words
+    const words = page.text.split(/\s+/);
+    let startWordIdx = 0;
+    const wordsPerChunk = Math.max(50, Math.floor(targetChunkTokens * 0.75));
+    const overlapWords = Math.max(10, Math.floor(overlapTokens * 0.75));
+
+    while (startWordIdx < words.length) {
+      const endWordIdx = Math.min(words.length, startWordIdx + wordsPerChunk);
+      const chunkText = words.slice(startWordIdx, endWordIdx).join(' ');
+
+      chunks.push({
+        chunkIndex: chunkIndex++,
+        pageNumber: page.pageNumber,
+        content: chunkText,
+        tokenCount: estimateTokens(chunkText),
+      });
+
+      if (endWordIdx >= words.length) break;
+      startWordIdx += wordsPerChunk - overlapWords;
+    }
+  }
+
+  return chunks;
+}
+
+
+/**
+ * Convert Canvas HTML (page bodies, assignment descriptions) to readable plain text.
+ * Block elements become line breaks so list items and paragraphs stay separated.
+ */
+export function htmlToText(html: string): string {
+  if (!html || !html.trim()) return '';
+  const doc = new DOMParser().parseFromString(html, 'text/html');
+  doc.querySelectorAll('script, style, noscript').forEach((el) => el.remove());
+  doc.querySelectorAll('br').forEach((el) => el.replaceWith('\n'));
+  doc.querySelectorAll('p, div, li, h1, h2, h3, h4, h5, h6, tr, blockquote, pre').forEach((el) => {
+    el.prepend('\n');
+    el.append('\n');
+  });
+  return (doc.body.textContent || '')
+    .replace(/\u00a0/g, ' ')
+    .replace(/[ \t]+/g, ' ')
+    .replace(/\n\s*\n+/g, '\n')
+    .trim();
 }

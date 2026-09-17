@@ -5,6 +5,7 @@ export interface AppSettings {
   apiKey: string;
   baseUrl: string;
   model: string;
+  embeddingModel?: string;
   llmProvider: 'openai' | 'google';
   contextThreshold: number;
 }
@@ -115,6 +116,23 @@ export const Settings: React.FC<SettingsProps> = ({ settings, onSettingsChange, 
           />
           <p className="text-xs text-gray-500 mt-1">
             The model to use for AI responses
+          </p>
+        </div>
+
+        {/* Embedding Model */}
+        <div>
+          <label className="block text-sm font-semibold text-gray-800 mb-2">
+            Embedding Model Name
+          </label>
+          <input
+            type="text"
+            value={form.embeddingModel || ''}
+            onChange={(e) => handleChange('embeddingModel', e.target.value)}
+            className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-200"
+            placeholder={form.llmProvider === 'google' ? 'gemini-embedding-2' : 'text-embedding-3-small'}
+          />
+          <p className="text-xs text-gray-500 mt-1">
+            The model used for vector embeddings in local RAG (Default: gemini-embedding-2 for Google, text-embedding-3-small for OpenAI, targeting 768 dimensions)
           </p>
         </div>
 
