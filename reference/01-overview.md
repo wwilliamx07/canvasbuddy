@@ -16,7 +16,7 @@ Design constraints that shape everything:
 |---|---|---|
 | Extension format | Manifest V3 | `extension/manifest.json` |
 | Surface | Side panel (`side_panel.default_path = index.html`) | One panel per browser window. The service worker (`src/background.ts`) does nothing except `setPanelBehavior({ openPanelOnActionClick: true })`. |
-| Permissions | `sidePanel`, `storage`, `alarms`; host `https://*.utoronto.ca/*` | `storage`/`alarms` are currently unused (localStorage is used instead). |
+| Permissions | `sidePanel`; host `https://*.utoronto.ca/*` | Persistence uses localStorage and IndexedDB, so no `storage` permission is needed. |
 | CSP | `script-src 'self' 'wasm-unsafe-eval'` | Required for PGlite's WASM. Inline scripts are blocked. |
 | UI | React 19, TypeScript, Tailwind v4 (`@tailwindcss/postcss`), `lucide-react` icons, `marked` for Markdown | |
 | Database | `@electric-sql/pglite` + `@electric-sql/pglite-pgvector`, persisted at `idb://canvas-buddy-db` | Postgres compiled to WASM. See `04-knowledge-graph.md`. |
@@ -51,7 +51,8 @@ canvasbuddy/
         ├── canvas/
         │   ├── http.ts        ← CANVAS_BASE, canvasGet, fetchAllPages, CanvasHttpError
         │   ├── freshness.ts   ← ensureCurrent: TTL / probe / debounce / unavailable policy, sync_state
-        │   ├── collections.ts ← registry: fetch + probe + shape + upsert for all 9 collections
+        │   ├── collections.ts ← registry: fetch + probe + shape + upsert for all 10 collections
+        │   ├── links.ts       ← ingestHtml: HTML body → text with link markers + content_links rows
         │   └── sync.ts        ← JIT document indexing (files, pages, assignment descriptions)
         ├── db/
         │   ├── pglite.ts      ← singleton DB init + Web Lock
@@ -61,7 +62,9 @@ canvasbuddy/
         ├── embeddings/
         │   └── embeddingClient.ts ← Gemini / OpenAI embedding calls
         ├── utils/
-        │   └── textExtractor.ts   ← PDF/PPTX/HTML → structured pages, chunking
+        │   ├── textExtractor.ts   ← PDF/PPTX/HTML → structured pages, chunking
+        │   ├── canvasLinks.ts     ← parse Canvas hrefs, HTML → text with [file 123]-style markers
+        │   └── markdown.ts        ← marked + DOMPurify for assistant replies
         └── types/
             └── canvas.ts      ← Canvas API entity types, graph stats, retrieved chunk
 ```

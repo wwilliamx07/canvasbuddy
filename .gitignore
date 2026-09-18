@@ -7,3 +7,5 @@ probe-file.js
 probe out
 out.txt
 todo.txt
+reference/.obsidian
+probe-home.js

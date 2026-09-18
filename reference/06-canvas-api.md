@@ -24,7 +24,9 @@ Newest-N collections (announcements, inbox) pass `maxPages` and accept that olde
 
 | Purpose | Method + path | Used by |
 |---|---|---|
-| Active courses with term | `GET /courses?enrollment_state=active&include[]=term` | `courses` sync |
+| Active courses with term (+ `default_view`) | `GET /courses?enrollment_state=active&include[]=term` | `courses` sync |
+| Course navigation | `GET /courses/:c/tabs` | `courses` sync (one per course; students receive visible tabs only) |
+| Front page with body | `GET /courses/:c/front_page` | `home` probe + sync; page loader fallback. 404 = the course has no front page |
 | Module list (probe) | `GET /courses/:c/modules` | `modules` probe (fingerprint) |
 | Modules with inline items | `GET /courses/:c/modules?include[]=items` | `modules` full sync |
 | Items of one module | `GET /courses/:c/modules/:m/items` | `modules` partial sync; fallback when Canvas omits inline items |
@@ -35,13 +37,15 @@ Newest-N collections (announcements, inbox) pass `maxPages` and accept that olde
 | File metadata | `GET /courses/:c/files/:f`, then `GET /files/:f` | `fetchFileMetadata` (indexing, read_document) |
 | Signed download URL | `GET /files/:f/public_url` | file indexing |
 | Published pages (list / probe) | `GET /courses/:c/pages?published=true&sort=updated_at&order=desc[&per_page=1]` | `pages` sync / probe — 404 when the course hides Pages |
-| Single page with body | `GET /courses/:c/pages/:slug` | page indexing |
+| Single page with body | `GET /courses/:c/pages/:slug` | page indexing (works even when the Pages listing is 404) |
 | Announcements (list / probe) | `GET /courses/:c/discussion_topics?only_announcements=true[&per_page=1]` | `announcements` sync / probe |
 | Planner | `GET /planner/items?start_date&end_date` | `planner` sync (rolling window) and `get_planner` for ranges outside it (live, not stored) |
 | Inbox list (list / probe) | `GET /conversations[?per_page=1]` | `inbox` sync / probe |
 | Inbox thread | `GET /conversations/:id` | `inbox` sync, for conversations whose `last_message_at` moved |
 
 Verified against q.utoronto.ca on 2026-09-17: ETag/`If-None-Match` is **not** honoured (200, never 304); `exclude_response_fields` works; all three probed courses return 403 for `/files` and 404 for `/pages`.
+
+Verified 2026-09-18 on a course whose Home is a front page (`default_view: wiki`): `/front_page` and `/pages/:slug` return 200 with the body although the Pages listing is 404 and the Files listing, `/folders/root` and folder listings are all 403; a file linked from the front page is readable by id through both `/courses/:c/files/:id` and `/files/:id`, and `/files/:id/public_url` works. Hidden tabs are simply absent from `/tabs` for students. So **hidden areas restrict listing, not access**: discovery has to come from links.
 
 ## Response handling conventions
 
@@ -57,4 +61,4 @@ Module item `type` values seen: `File`, `Page`, `Assignment`, `Quiz`, `Discussio
 
 ## Rate limiting
 
-Canvas throttles bursts. The code keeps Canvas calls sequential (tools execute one at a time; the Graph Explorer's "Refresh Course" runs the four collection syncs in series). There is no retry/backoff.
+Canvas throttles bursts. The code keeps Canvas calls sequential (tools execute one at a time; the Graph Explorer's "Refresh Course" runs its five collection syncs in series; the courses sync fetches each course's tabs in series). There is no retry/backoff.
