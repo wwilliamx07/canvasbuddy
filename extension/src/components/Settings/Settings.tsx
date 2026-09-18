@@ -19,6 +19,7 @@ const FRESHNESS_FIELDS: Array<{ key: keyof FreshnessSettings; label: string; hin
   { key: 'assignments', label: 'Assignments', hint: 'names, due dates, points' },
   { key: 'files', label: 'Files', hint: 'course Files list' },
   { key: 'pages', label: 'Pages', hint: 'wiki page list' },
+  { key: 'home', label: 'Home page', hint: 'course front page and what it links to' },
   { key: 'submissions', label: 'Submissions', hint: 'your grades & submission status' },
   { key: 'announcements', label: 'Announcements', hint: '' },
   { key: 'planner', label: 'Planner', hint: 'cross-course to-do window' },

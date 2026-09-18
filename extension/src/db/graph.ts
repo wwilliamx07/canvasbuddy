@@ -5,6 +5,8 @@ import type {
   CanvasModuleItem,
   CanvasAssignment,
   CanvasPage,
+  CanvasTab,
+  ContentLink,
   GraphStats,
   ShapedSubmission,
   ShapedAnnouncement,
@@ -58,8 +60,14 @@ export async function exploreGraph(options: {
       const p = add(`%${search_term}%`);
       conditions.push(`(name ILIKE ${p} OR course_code ILIKE ${p})`);
     }
+    // home_view: what the "Home" nav item shows; nav: the nav bar, with launch URLs for external tools
     const sql = `
       SELECT c.course_id, c.name, c.course_code, c.term,
+        CASE WHEN c.default_view = 'wiki'
+             THEN 'front page' || COALESCE((SELECT ' "' || p.title || '" (page ' || p.page_url || ')' FROM pages p WHERE p.course_id = c.course_id AND p.front_page LIMIT 1), '')
+             ELSE c.default_view END AS home_view,
+        (SELECT string_agg(CASE WHEN t.type = 'external' THEN t.label || ' — ' || COALESCE(t.html_url, '') ELSE t.label END, ' · ' ORDER BY t.position)
+           FROM course_tabs t WHERE t.course_id = c.course_id) AS nav,
         (SELECT COUNT(*) FROM modules m WHERE m.course_id = c.course_id)     AS module_count,
         (SELECT COUNT(*) FROM assignments a WHERE a.course_id = c.course_id) AS assignment_count,
         (SELECT COUNT(*) FROM files f WHERE f.course_id = c.course_id AND f.total_chunks > 0) AS indexed_document_count,
@@ -153,12 +161,12 @@ export async function exploreGraph(options: {
     if (course_id) conditions.push(`p.course_id = ${add(String(course_id))}`);
     if (search_term) conditions.push(`p.title ILIKE ${add(`%${search_term}%`)}`);
     const sql = `
-      SELECT p.page_url, p.course_id, p.title, p.updated_at, p.html_url,
+      SELECT p.page_url, p.course_id, p.title, p.updated_at, p.html_url, p.front_page,
         COALESCE(f.total_chunks, 0) > 0 AS indexed
       FROM pages p
       LEFT JOIN files f ON f.file_id = 'page:' || p.course_id || ':' || p.page_url
       ${conditions.length ? 'WHERE ' + conditions.join(' AND ') : ''}
-      ORDER BY p.title ASC
+      ORDER BY p.front_page DESC, p.title ASC
       LIMIT ${add(limit)}`;
     return (await db.query(sql, params)).rows;
   }
@@ -171,6 +179,146 @@ export async function exploreGraph(options: {
   }
 
   return [];
+}
+
+/** Where a piece of content is reachable from, as one string: "home page; module: Week 1; announcement: …". */
+const LINKED_FROM_SQL = `
+  SELECT s.to_ref, string_agg(DISTINCT s.src, '; ') AS linked_from FROM (
+    SELECT mi.content_ref AS to_ref, 'module: ' || m.name AS src
+    FROM module_items mi JOIN modules m ON m.module_id = mi.module_id
+    WHERE m.course_id = $1 AND mi.item_type = $2
+    UNION ALL
+    SELECT cl.to_ref,
+      CASE
+        WHEN cl.from_type = 'page' AND p.front_page THEN 'home page'
+        WHEN cl.from_type = 'page' THEN 'page: ' || COALESCE(p.title, cl.from_id)
+        WHEN cl.from_type = 'assignment' THEN 'assignment: ' || COALESCE(a.name, cl.from_id)
+        WHEN cl.from_type = 'announcement' THEN 'announcement: ' || COALESCE(an.title, cl.from_id)
+        ELSE cl.from_type
+      END
+    FROM content_links cl
+    LEFT JOIN pages p ON cl.from_type = 'page' AND p.course_id = cl.course_id AND p.page_url = cl.from_id
+    LEFT JOIN assignments a ON cl.from_type = 'assignment' AND a.assignment_id = cl.from_id
+    LEFT JOIN announcements an ON cl.from_type = 'announcement' AND an.announcement_id = cl.from_id
+    WHERE cl.course_id = $1 AND cl.to_type = $3
+  ) s GROUP BY s.to_ref`;
+
+/**
+ * Every file the course is known to have, however it was discovered: the Files area (when
+ * visible), module items, and links on the home page / pages / assignments / announcements.
+ */
+export async function listCourseFiles(courseId: string, search?: string, limit?: number): Promise<any[]> {
+  const db = await getDB();
+  const res = await db.query(
+    `WITH linked AS (${LINKED_FROM_SQL}),
+     known AS (
+       SELECT f.file_id, COALESCE(f.display_name, f.filename) AS name, NULLIF(f.filename, COALESCE(f.display_name, f.filename)) AS filename,
+         f.content_type, f.size, f.html_url, f.total_chunks > 0 AS indexed
+       FROM files f WHERE f.course_id = $1 AND f.source_type = 'file'
+       UNION
+       SELECT mi.content_ref, mi.title, NULL, NULL, NULL, mi.html_url, FALSE
+       FROM module_items mi JOIN modules m ON m.module_id = mi.module_id
+       WHERE m.course_id = $1 AND mi.item_type = 'File' AND mi.content_ref IS NOT NULL
+         AND mi.content_ref NOT IN (SELECT file_id FROM files WHERE course_id = $1)
+     )
+     SELECT k.file_id, k.name, k.filename, k.content_type, k.size, k.html_url, k.indexed, l.linked_from
+     FROM known k LEFT JOIN linked l ON l.to_ref = k.file_id
+     WHERE ($4::text IS NULL OR k.name ILIKE $4 OR k.filename ILIKE $4 OR l.linked_from ILIKE $4)
+     ORDER BY k.indexed DESC, k.name ASC
+     LIMIT $5`,
+    [String(courseId), 'File', 'file', search ? `%${search}%` : null, clampLimit(limit)]
+  );
+  return res.rows;
+}
+
+/** Every page the course is known to have (Pages area when visible, module items, links); the front page first. */
+export async function listCoursePages(courseId: string, search?: string, limit?: number): Promise<any[]> {
+  const db = await getDB();
+  const res = await db.query(
+    `WITH linked AS (${LINKED_FROM_SQL})
+     SELECT p.page_url, p.title, p.updated_at, p.html_url, p.front_page,
+       COALESCE(f.total_chunks, 0) > 0 AS indexed, l.linked_from
+     FROM pages p
+     LEFT JOIN files f ON f.file_id = 'page:' || p.course_id || ':' || p.page_url
+     LEFT JOIN linked l ON l.to_ref = p.page_url
+     WHERE p.course_id = $1 AND ($4::text IS NULL OR p.title ILIKE $4 OR l.linked_from ILIKE $4)
+     ORDER BY p.front_page DESC, p.title ASC
+     LIMIT $5`,
+    [String(courseId), 'Page', 'page', search ? `%${search}%` : null, clampLimit(limit)]
+  );
+  return res.rows;
+}
+
+/**
+ * Replaces the links recorded for one HTML body and registers what they point at, so a file or
+ * page that is only reachable through a link becomes listable and indexable. Registration never
+ * overwrites a row that exists already (an indexed file keeps its real name and chunks).
+ */
+export async function storeContentLinks(
+  courseId: string,
+  fromType: 'page' | 'assignment' | 'announcement',
+  fromId: string,
+  links: ContentLink[],
+  tx?: Queryable
+): Promise<void> {
+  const db = await q(tx);
+  const course = String(courseId);
+  await db.query('DELETE FROM content_links WHERE course_id = $1 AND from_type = $2 AND from_id = $3', [course, fromType, String(fromId)]);
+  for (const l of links) {
+    await db.query(
+      `INSERT INTO content_links (course_id, from_type, from_id, to_type, to_ref, label, position)
+       VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT DO NOTHING`,
+      [course, fromType, String(fromId), l.to_type, l.to_ref, l.label, l.position]
+    );
+    // Only content of this course is registered; a link into another course is recorded, not adopted
+    if (l.course_id && l.course_id !== course) continue;
+    if (l.to_type === 'file') {
+      // Canvas puts the real filename in the anchor's title; the anchor text is what the student sees
+      const filename = l.title && /\.\w{2,5}$/.test(l.title) ? l.title : null;
+      await db.query(
+        `INSERT INTO files (file_id, course_id, filename, display_name, version, total_chunks, source_type)
+         VALUES ($1, $2, $3, $4, '', 0, 'file') ON CONFLICT (file_id) DO NOTHING`,
+        [l.to_ref, course, filename || l.label || `file ${l.to_ref}`, l.label || filename || `file ${l.to_ref}`]
+      );
+    } else if (l.to_type === 'page') {
+      await db.query(
+        `INSERT INTO pages (page_url, course_id, title) VALUES ($1, $2, $3) ON CONFLICT (course_id, page_url) DO NOTHING`,
+        [l.to_ref, course, l.label || l.to_ref]
+      );
+    }
+  }
+}
+
+/** Sets which page is the course front page (clearing the flag elsewhere); upserts the page row. */
+export async function setFrontPage(courseId: string, page: CanvasPage | null, tx?: Queryable): Promise<void> {
+  const db = await q(tx);
+  await db.query('UPDATE pages SET front_page = FALSE WHERE course_id = $1 AND front_page', [String(courseId)]);
+  if (!page?.url) return;
+  await db.query(
+    `INSERT INTO pages (page_url, course_id, title, updated_at, html_url, front_page, synced_at)
+     VALUES ($1, $2, $3, $4, $5, TRUE, CURRENT_TIMESTAMP)
+     ON CONFLICT (course_id, page_url) DO UPDATE SET
+       title = EXCLUDED.title, updated_at = EXCLUDED.updated_at, html_url = COALESCE(EXCLUDED.html_url, pages.html_url),
+       front_page = TRUE, synced_at = CURRENT_TIMESTAMP`,
+    [page.url, String(courseId), page.title || page.url, page.updated_at || null, page.html_url || null]
+  );
+}
+
+/** Replaces a course's navigation bar. */
+export async function replaceCourseTabs(courseId: string, tabs: CanvasTab[], tx?: Queryable): Promise<number> {
+  const db = await q(tx);
+  await db.query('DELETE FROM course_tabs WHERE course_id = $1', [String(courseId)]);
+  let n = 0;
+  for (const t of tabs) {
+    if (!t.id || t.hidden) continue;
+    await db.query(
+      `INSERT INTO course_tabs (course_id, tab_id, label, type, html_url, position)
+       VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (course_id, tab_id) DO NOTHING`,
+      [String(courseId), String(t.id), t.label || t.id, t.type || 'internal', t.full_url || t.html_url || null, t.position ?? n]
+    );
+    n++;
+  }
+  return n;
 }
 
 /**
@@ -378,14 +526,15 @@ export async function upsertCourses(courses: CanvasCourse[], tx?: Queryable): Pr
 
   for (const c of courses) {
     await db.query(
-      `INSERT INTO courses (course_id, name, course_code, term, synced_at)
-       VALUES ($1, $2, $3, $4, CURRENT_TIMESTAMP)
+      `INSERT INTO courses (course_id, name, course_code, term, default_view, synced_at)
+       VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP)
        ON CONFLICT (course_id) DO UPDATE SET
          name = EXCLUDED.name,
          course_code = EXCLUDED.course_code,
          term = EXCLUDED.term,
+         default_view = COALESCE(EXCLUDED.default_view, courses.default_view),
          synced_at = CURRENT_TIMESTAMP`,
-      [String(c.id), c.name, c.course_code || null, c.term?.name || null]
+      [String(c.id), c.name, c.course_code || null, c.term?.name || null, c.default_view || null]
     );
   }
 
@@ -555,6 +704,10 @@ export async function upsertAndPruneAssignments(
          AND substring(file_id from 12) NOT IN (SELECT assignment_id FROM assignments WHERE course_id = $1)`,
       [String(courseId)]
     );
+    await db.query(
+      `DELETE FROM content_links WHERE course_id = $1 AND from_type = 'assignment' AND from_id NOT IN (SELECT assignment_id FROM assignments WHERE course_id = $1)`,
+      [String(courseId)]
+    );
   }
   return { upserted: assignments.length, pruned };
 }
@@ -585,14 +738,15 @@ export async function upsertAndPrunePages(
     if (!p.url) continue;
     validUrls.push(p.url);
     await db.query(
-      `INSERT INTO pages (page_url, course_id, title, updated_at, html_url, synced_at)
-       VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP)
+      `INSERT INTO pages (page_url, course_id, title, updated_at, html_url, front_page, synced_at)
+       VALUES ($1, $2, $3, $4, $5, COALESCE($6, FALSE), CURRENT_TIMESTAMP)
        ON CONFLICT (course_id, page_url) DO UPDATE SET
          title = EXCLUDED.title,
          updated_at = EXCLUDED.updated_at,
          html_url = EXCLUDED.html_url,
+         front_page = COALESCE($6, pages.front_page),
          synced_at = CURRENT_TIMESTAMP`,
-      [p.url, String(courseId), p.title || p.url, p.updated_at || null, p.html_url || null]
+      [p.url, String(courseId), p.title || p.url, p.updated_at || null, p.html_url || null, p.front_page ?? null]
     );
   }
 
@@ -601,6 +755,10 @@ export async function upsertAndPrunePages(
     await db.query(
       `DELETE FROM files WHERE source_type = 'page' AND course_id = $1
          AND substring(file_id from length('page:' || $1 || ':') + 1) NOT IN (SELECT page_url FROM pages WHERE course_id = $1)`,
+      [String(courseId)]
+    );
+    await db.query(
+      `DELETE FROM content_links WHERE course_id = $1 AND from_type = 'page' AND from_id NOT IN (SELECT page_url FROM pages WHERE course_id = $1)`,
       [String(courseId)]
     );
   }
@@ -649,6 +807,12 @@ export async function upsertAndPruneAnnouncements(
     );
   }
   const pruned = await pruneNotIn(db, 'announcements', 'announcement_id', 'course_id = $1', [String(courseId)], ids);
+  if (pruned > 0) {
+    await db.query(
+      `DELETE FROM content_links WHERE course_id = $1 AND from_type = 'announcement' AND from_id NOT IN (SELECT announcement_id FROM announcements WHERE course_id = $1)`,
+      [String(courseId)]
+    );
+  }
   return { upserted: rows.length, pruned };
 }
 
@@ -763,7 +927,8 @@ export async function getGraphStatistics(): Promise<GraphStats> {
     db.query('SELECT COUNT(*) as count FROM module_items'),
     db.query('SELECT COUNT(*) as count FROM assignments'),
     db.query('SELECT COUNT(*) as count FROM files'),
-    db.query('SELECT COUNT(*) as count FROM file_chunks'),
+    // chunks of an outdated document version are kept only as a vector cache; don't count them
+    db.query('SELECT COUNT(*) as count FROM file_chunks fc JOIN files f ON f.file_id = fc.file_id WHERE f.total_chunks > 0'),
   ]);
 
   const readCount = (row: unknown): number => Number((row as { count?: string | number } | undefined)?.count || 0);

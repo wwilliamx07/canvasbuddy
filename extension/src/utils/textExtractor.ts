@@ -15,6 +15,8 @@ export interface StructuredPage {
 export interface DocumentChunk {
   chunkIndex: number;
   pageNumber?: number;
+  /** Last page/slide in the chunk when several small pages were merged; equals pageNumber otherwise */
+  pageEnd?: number;
   content: string;
   tokenCount: number;
 }
@@ -38,9 +40,17 @@ export async function extractStructuredFromPDF(fileBuffer: ArrayBuffer | Uint8Ar
     for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
       const page = await pdf.getPage(pageNum);
       const textContent = await page.getTextContent();
-      const pageText = textContent.items
-        .map((item: any) => item.str)
-        .join(' ')
+      // pdf.js marks the last item of each visual line with hasEOL; keeping those breaks
+      // preserves bullet lists and table rows instead of running them into one line.
+      let raw = '';
+      for (const item of textContent.items) {
+        if (!('str' in item)) continue;
+        raw += item.str + (item.hasEOL ? '\n' : ' ');
+      }
+      const pageText = raw
+        .replace(/[ \t]+/g, ' ')
+        .replace(/ ?\n ?/g, '\n')
+        .replace(/\n{3,}/g, '\n\n')
         .trim();
 
       if (pageText) {
@@ -128,55 +138,75 @@ export async function extractStructuredFromFile(
 }
 
 /**
- * Chunk a structured document into semantically sized pieces preserving page/slide numbers
+ * Chunk a structured document into retrieval-sized pieces. A long page is split with overlap;
+ * a run of small pages/slides is merged into one chunk so a 30-token slide is embedded with its
+ * neighbours' context. Every chunk records the page range it covers (pageNumber..pageEnd) for
+ * citation, and no chunk ever spans a page that is not small.
  */
 export function chunkStructuredDocument(
   pages: StructuredPage[],
   targetChunkTokens: number = 400,
-  overlapTokens: number = 50
+  overlapTokens: number = 50,
+  minChunkTokens: number = Math.round(targetChunkTokens / 4)
 ): DocumentChunk[] {
   const chunks: DocumentChunk[] = [];
-  let chunkIndex = 0;
+  let group: StructuredPage[] = [];
+  let groupTokens = 0;
+
+  const flush = () => {
+    if (group.length === 0) return;
+    const content = group.map((p) => p.text).join('\n\n');
+    chunks.push({
+      chunkIndex: chunks.length,
+      pageNumber: group[0].pageNumber,
+      pageEnd: group[group.length - 1].pageNumber,
+      content,
+      tokenCount: estimateTokens(content),
+    });
+    group = [];
+    groupTokens = 0;
+  };
 
   for (const page of pages) {
     const pageTokens = estimateTokens(page.text);
 
-    // If page is reasonably sized (e.g. standard presentation slide or short page), keep as one chunk
-    if (pageTokens <= targetChunkTokens * 1.4) {
-      chunks.push({
-        chunkIndex: chunkIndex++,
-        pageNumber: page.pageNumber,
-        content: page.text,
-        tokenCount: pageTokens,
-      });
+    if (pageTokens > targetChunkTokens * 1.4) {
+      flush();
+      // Tokens keep their trailing whitespace so line breaks survive the split
+      const words = page.text.match(/\S+\s*/g) || [];
+      const wordsPerChunk = Math.max(50, Math.floor(targetChunkTokens * 0.75));
+      const overlapWords = Math.max(10, Math.floor(overlapTokens * 0.75));
+      let start = 0;
+      while (start < words.length) {
+        const end = Math.min(words.length, start + wordsPerChunk);
+        const content = words.slice(start, end).join('').trim();
+        chunks.push({
+          chunkIndex: chunks.length,
+          pageNumber: page.pageNumber,
+          pageEnd: page.pageNumber,
+          content,
+          tokenCount: estimateTokens(content),
+        });
+        if (end >= words.length) break;
+        start += wordsPerChunk - overlapWords;
+      }
       continue;
     }
 
-    // Otherwise, split long page into overlapping token segments by sentences or words
-    const words = page.text.split(/\s+/);
-    let startWordIdx = 0;
-    const wordsPerChunk = Math.max(50, Math.floor(targetChunkTokens * 0.75));
-    const overlapWords = Math.max(10, Math.floor(overlapTokens * 0.75));
-
-    while (startWordIdx < words.length) {
-      const endWordIdx = Math.min(words.length, startWordIdx + wordsPerChunk);
-      const chunkText = words.slice(startWordIdx, endWordIdx).join(' ');
-
-      chunks.push({
-        chunkIndex: chunkIndex++,
-        pageNumber: page.pageNumber,
-        content: chunkText,
-        tokenCount: estimateTokens(chunkText),
-      });
-
-      if (endWordIdx >= words.length) break;
-      startWordIdx += wordsPerChunk - overlapWords;
-    }
+    // Merge only while one side is small and the result stays within the target, so
+    // normal-sized pages keep their own chunk (and their own citation).
+    const canMerge =
+      group.length > 0 &&
+      groupTokens + pageTokens <= targetChunkTokens &&
+      (groupTokens < minChunkTokens || pageTokens < minChunkTokens);
+    if (!canMerge) flush();
+    group.push(page);
+    groupTokens += pageTokens;
   }
+  flush();
 
   return chunks;
 }
-
 
 /**
  * Convert Canvas HTML (page bodies, assignment descriptions) to readable plain text.

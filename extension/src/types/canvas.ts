@@ -13,7 +13,33 @@ export interface CanvasCourse {
     start_at?: string;
     end_at?: string;
   };
+  /** What the course "Home" nav item shows: 'wiki' (front page) | 'modules' | 'syllabus' | 'assignments' | 'feed' */
+  default_view?: string;
   synced_at?: string;
+}
+
+/** One entry of a course's navigation bar (Tabs API). Students only receive visible tabs. */
+export interface CanvasTab {
+  id: string;
+  label: string;
+  type?: 'internal' | 'external';
+  html_url?: string;
+  full_url?: string;
+  position?: number;
+  hidden?: boolean;
+}
+
+/** A hyperlink found in Canvas HTML (front page, wiki page, assignment description, announcement). */
+export interface ContentLink {
+  to_type: 'file' | 'page' | 'assignment' | 'quiz' | 'discussion' | 'module' | 'external';
+  /** file id / page slug / assignment id / … / absolute URL for external */
+  to_ref: string;
+  label: string | null;
+  /** The anchor's title attribute; Canvas puts the real filename there on file links */
+  title?: string | null;
+  /** Course the link points into when it names one (may differ from the page's course) */
+  course_id?: string | null;
+  position: number;
 }
 
 export interface CanvasModule {
@@ -67,6 +93,7 @@ export interface CanvasPage {
   updated_at?: string;
   html_url?: string;
   published?: boolean;
+  front_page?: boolean;
 }
 
 export interface CanvasFile {
@@ -98,6 +125,8 @@ export interface RetrievedChunk {
   chunk_id: string;
   chunk_index: number;
   page_number?: number;
+  /** last page/slide covered by the chunk (merged small pages); equals page_number otherwise */
+  page_end?: number;
   content: string;
   similarity: number;
   filename: string;

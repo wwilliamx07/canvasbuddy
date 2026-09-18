@@ -4,6 +4,8 @@ import { describeEnsure, type EnsureResult } from '../canvas/freshness';
 import { indexDocumentJustInTime, fetchAssignmentWithDescription } from '../canvas/sync';
 import {
   exploreGraph,
+  listCourseFiles,
+  listCoursePages,
   getAssignmentRow,
   listAnnouncements,
   listPlannerItems,
@@ -20,7 +22,7 @@ import {
   type DocumentSourceType,
 } from '../db/rag';
 import { getEmbedding } from '../embeddings/embeddingClient';
-import { htmlToText } from '../utils/textExtractor';
+import { ingestHtml } from '../canvas/links';
 import type { ShapedPlannerItem } from '../types/canvas';
 
 /**
@@ -57,7 +59,7 @@ export const TOOL_CONFIG: ToolConfig[] = [
   {
     name: 'list_content',
     description:
-      'List a course\'s structure or a specific kind of content. kind="items" finds files/pages/quizzes inside modules (the way to locate a lecture or document); "assignments" gives names, due dates, points and optionally your submission status; "files"/"pages" list the course Files/Pages areas. Always pass search when the user named something; keep limit small.',
+      'List a course\'s structure or a specific kind of content. kind="courses" also tells what each course\'s Home shows and its nav bar (incl. external tools); "items" finds files/pages/quizzes inside modules; "files"/"pages" list every file/page the course is known to have — the Files/Pages areas when visible plus everything linked from modules, the home page, announcements and assignment descriptions (linked_from says where) — with the home page listed first under "pages"; "assignments" gives names, due dates, points and optionally your submission status. Always pass search when the user named something; keep limit small.',
     parameters: {
       type: 'OBJECT',
       properties: {
@@ -211,7 +213,10 @@ async function ensureDocumentIndexed(
   return {
     docId: res.docId,
     title: res.title,
-    note: res.status === 'indexed' ? `Indexed "${res.title}" (${res.chunksCount} chunks).` : undefined,
+    note:
+      res.status === 'indexed'
+        ? `Indexed "${res.title}" (${res.chunksCount} chunks${res.chunksEmbedded < res.chunksCount ? `, ${res.chunksCount - res.chunksEmbedded} unchanged` : ''}).`
+        : undefined,
   };
 }
 
@@ -245,7 +250,13 @@ export const toolFunctions: Record<string, ToolFn> = {
           limit,
         });
         const notes = notesFrom([r]);
-        if (rows.length === 0 && args.search) notes.push(`No ${kind} match "${args.search}"; try a shorter search.`);
+        if (rows.length === 0) {
+          notes.push(
+            args.search
+              ? `No ${kind} match "${args.search}"; try a shorter search, or kind="files"/"pages", which also cover what the course home page links to.`
+              : 'This course has no module content; use kind="files"/"pages" — they include what the course home page links to.'
+          );
+        }
         return withNotes({ data: rows }, notes);
       }
 
@@ -272,19 +283,18 @@ export const toolFunctions: Record<string, ToolFn> = {
       }
 
       if (kind === 'files' || kind === 'pages') {
-        const r = await ensureCollection(kind, { courseId }, { settings, refresh });
-        if (r.status === 'unavailable') {
-          // The course hides its Files/Pages area; what is linked from modules is still reachable.
-          const itemType = kind === 'files' ? 'File' : 'Page';
-          await ensureCollection('modules', { courseId }, { settings });
-          const items = await exploreGraph({ entity_type: 'module_items', course_id: courseId, search_term: args.search, limit: 100 });
-          const rows = items.filter((i: { item_type: string }) => i.item_type === itemType).slice(0, limit);
-          return withNotes({ data: rows }, [
-            `The ${kind} area of this course is hidden from students, so these are the ${kind} linked from modules instead (use content_ref as the document_id).`,
-          ]);
+        // The area listing (when the course shows it) plus everything discovered through modules
+        // and links on the home page / pages / assignments / announcements.
+        const results = await ensureCollections([kind, 'modules', 'home'], { courseId }, { settings, refresh });
+        const rows = kind === 'files'
+          ? await listCourseFiles(courseId, args.search, limit)
+          : await listCoursePages(courseId, args.search, limit);
+        const notes = notesFrom(results);
+        if (results[0].status === 'unavailable') {
+          notes.push(`The ${kind} area of this course is hidden from students; these are the ${kind} reachable through modules and links (linked_from).`);
         }
-        const rows = await exploreGraph({ entity_type: kind, course_id: courseId, search_term: args.search, limit });
-        return withNotes({ data: rows }, notesFrom([r]));
+        if (rows.length === 0 && args.search) notes.push(`No ${kind} match "${args.search}"; try a shorter search.`);
+        return withNotes({ data: rows }, notes);
       }
 
       return fail(`Unknown kind "${kind}"`);
@@ -308,7 +318,7 @@ export const toolFunctions: Record<string, ToolFn> = {
         row = await getAssignmentRow(assignmentId);
       }
 
-      const text = htmlToText(row.description || '');
+      const text = await ingestHtml(courseId, 'assignment', assignmentId, row.description);
       return withNotes(
         {
           assignment: {
@@ -370,7 +380,7 @@ export const toolFunctions: Record<string, ToolFn> = {
             document: r.filename,
             document_type: r.source_type,
             document_id: r.source_type === 'file' ? r.file_id : r.file_id.replace(/^(page:[^:]+:|assignment:|conversation:)/, ''),
-            page_or_slide: r.page_number ?? null,
+            page_or_slide: r.page_number == null ? null : r.page_end != null && r.page_end > r.page_number ? `${r.page_number}-${r.page_end}` : r.page_number,
             module: r.module_name || null,
             excerpt: r.content,
           })),
@@ -404,13 +414,15 @@ export const toolFunctions: Record<string, ToolFn> = {
       let truncated = false;
       let lastPage: number | null = null;
       for (const c of chunks) {
-        const piece = (c.page_number != null && c.page_number !== lastPage ? `\n[page ${c.page_number}]\n` : '\n') + c.content;
+        const pageEnd = c.page_end != null ? Number(c.page_end) : null;
+        const label = pageEnd != null && pageEnd > Number(c.page_number) ? `pages ${c.page_number}-${pageEnd}` : `page ${c.page_number}`;
+        const piece = (c.page_number != null && c.page_number !== lastPage ? `\n[${label}]\n` : '\n') + c.content;
         if (text.length + piece.length > READ_MAX_CHARS) {
           truncated = true;
           break;
         }
         text += piece;
-        lastPage = c.page_number ?? lastPage;
+        lastPage = pageEnd ?? c.page_number ?? lastPage;
       }
 
       const notes = doc.note ? [doc.note] : [];

@@ -77,6 +77,11 @@ export async function getDB(): Promise<PGlite> {
 
       // Run schema migrations and vector initialization
       await db.exec(SCHEMA_SQL);
+      // HNSW scans stop after ef_search candidates; with a WHERE filter that can return fewer rows
+      // than LIMIT. Iterative scan keeps walking the graph until the limit is met (pgvector >= 0.8).
+      // The tuple cap is raised so a search restricted to one small document inside a large corpus
+      // still fills its LIMIT instead of giving up early.
+      await db.exec('SET hnsw.iterative_scan = relaxed_order; SET hnsw.max_scan_tuples = 200000');
 
       dbInstance = db;
       return db;

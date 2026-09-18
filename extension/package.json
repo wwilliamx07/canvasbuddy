@@ -14,6 +14,7 @@
     "@electric-sql/pglite-pgvector": "^0.0.9",
     "@tailwindcss/postcss": "^4.2.1",
     "@tailwindcss/typography": "^0.5.15",
+    "dompurify": "^3.4.15",
     "jszip": "^3.10.1",
     "lucide-react": "^0.577.0",
     "marked": "^12.0.2",

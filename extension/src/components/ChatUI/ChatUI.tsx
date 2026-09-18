@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { Send } from 'lucide-react';
-import { marked } from 'marked';
+import { renderMarkdown } from '../../utils/markdown';
 
 export interface Message {
   id: string;
@@ -62,7 +62,7 @@ export const ChatUI: React.FC<ChatUIProps> = ({ messages, onSendMessage, isLoadi
                   <div
                     className="prose prose-sm max-w-none dark:prose-invert break-words [&_*]:break-words [&_code]:break-all [&_pre]:overflow-x-auto"
                     dangerouslySetInnerHTML={{
-                      __html: marked(message.content) as string,
+                      __html: renderMarkdown(message.content),
                     }}
                   />
                 ) : (

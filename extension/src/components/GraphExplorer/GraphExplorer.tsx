@@ -177,10 +177,10 @@ export const GraphExplorer: React.FC<GraphExplorerProps> = ({ settings }) => {
   const handleSyncCurrentCourse = async () => {
     if (!selectedCourseId) return;
     setIsSyncing(true);
-    setSyncStatusMsg('Refreshing modules, assignments, files and pages...');
+    setSyncStatusMsg('Refreshing modules, assignments, files, pages and home page...');
     try {
       const results = await ensureCollections(
-        ['modules', 'assignments', 'files', 'pages'],
+        ['modules', 'assignments', 'files', 'pages', 'home'],
         { courseId: selectedCourseId },
         { settings, refresh: true }
       );
@@ -208,7 +208,9 @@ export const GraphExplorer: React.FC<GraphExplorerProps> = ({ settings }) => {
       setSyncStatusMsg(
         res.status === 'cached'
           ? `${res.title} was already indexed (${res.chunksCount} chunks).`
-          : `Indexed ${res.chunksCount} chunks for ${res.title}!`
+          : `Indexed ${res.chunksCount} chunks for ${res.title}${
+              res.chunksEmbedded < res.chunksCount ? ` (${res.chunksEmbedded} embedded, ${res.chunksCount - res.chunksEmbedded} unchanged)` : ''
+            }.`
       );
       const [updatedFiles, updatedStats, chunks] = await Promise.all([
         getFilesList(),
@@ -737,7 +739,11 @@ export const GraphExplorer: React.FC<GraphExplorerProps> = ({ settings }) => {
                           >
                             <div className="flex justify-between text-slate-400 text-[9px] mb-0.5">
                               <span>Chunk #{c.chunk_index}</span>
-                              {c.page_number && <span>Page/Slide {c.page_number}</span>}
+                              {c.page_number && (
+                                <span>
+                                  Page/Slide {c.page_end && Number(c.page_end) > Number(c.page_number) ? `${c.page_number}-${c.page_end}` : c.page_number}
+                                </span>
+                              )}
                             </div>
                             <p className="line-clamp-2 text-slate-300">{c.content}</p>
                           </div>

@@ -4,6 +4,7 @@ import { setAssignmentDescription } from '../db/graph';
 import {
   docIdFor,
   getDocumentCacheState,
+  getStoredEmbeddingsByHash,
   storeChunksWithEmbeddings,
   type DocumentSourceType,
 } from '../db/rag';
@@ -12,10 +13,10 @@ import { batchEmbed, resolveEmbeddingModel } from '../embeddings/embeddingClient
 import {
   extractStructuredFromFile,
   chunkStructuredDocument,
-  htmlToText,
   type StructuredPage,
 } from '../utils/textExtractor';
 import { CanvasHttpError, canvasGet } from './http';
+import { ingestHtml } from './links';
 
 /**
  * Just-in-time document indexing (files, wiki pages, assignment descriptions).
@@ -35,12 +36,32 @@ export interface IndexResult {
   sourceType: DocumentSourceType;
   title: string;
   chunksCount: number;
+  /** Chunks sent to the embedding API this time (the rest reused stored vectors); 0 when cached */
+  chunksEmbedded: number;
   htmlUrl?: string | null;
+}
+
+/** Human-readable page label for a chunk: "slide 4" or "slides 4-7". */
+export function pageRangeLabel(
+  pageNumber: number | null | undefined,
+  pageEnd: number | null | undefined,
+  unit: 'page' | 'slide'
+): string | null {
+  if (pageNumber == null) return null;
+  const end = pageEnd ?? pageNumber;
+  return end > pageNumber ? `${unit}s ${pageNumber}-${end}` : `${unit} ${pageNumber}`;
+}
+
+async function sha256Hex(text: string): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
+  return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, '0')).join('');
 }
 
 /**
  * Just-in-time extraction and vector indexing of a Canvas document (file, wiki page, or
  * assignment description). Cache is keyed on the upstream version AND the embedding model.
+ * On re-index, chunks whose text is unchanged keep their stored vector; only new or modified
+ * chunks are sent to the embedding API.
  */
 export async function indexDocumentJustInTime(target: IndexTarget, settings: AppSettings): Promise<IndexResult> {
   const embeddingModel = resolveEmbeddingModel(settings);
@@ -55,6 +76,7 @@ export async function indexDocumentJustInTime(target: IndexTarget, settings: App
       sourceType: target.sourceType,
       title: source.title,
       chunksCount: cached.totalChunks,
+      chunksEmbedded: 0,
       htmlUrl: source.htmlUrl,
     };
   }
@@ -69,15 +91,24 @@ export async function indexDocumentJustInTime(target: IndexTarget, settings: App
     throw new Error(`Chunking yielded 0 chunks for ${source.title}`);
   }
 
+  // Vectors of unchanged chunks are reused only if they came from the same model. The hash
+  // covers the stored text, not the context header, so a renamed module does not re-embed.
+  const hashes = await Promise.all(rawChunks.map((c) => sha256Hex(c.content)));
+  const reusable = cached?.embeddingModel === embeddingModel ? await getStoredEmbeddingsByHash(source.docId) : new Map<string, string>();
+  const toEmbed = rawChunks.map((_, i) => i).filter((i) => !reusable.has(hashes[i]));
+
   // Prepend a context header to what gets embedded (not to what is stored/displayed):
   // slide fragments like "- O(n log n)" mean little without the course and document they belong to.
   const header = await buildChunkHeader(source.docId, target, source.title);
-  const pageLabel = target.sourceType === 'file' && source.title.toLowerCase().endsWith('.pptx') ? 'slide' : 'page';
-  const embeddedTexts = rawChunks.map((c) =>
-    `${header}${c.pageNumber != null ? ` · ${pageLabel} ${c.pageNumber}` : ''}\n${c.content}`
-  );
+  const unit = target.sourceType === 'file' && source.title.toLowerCase().endsWith('.pptx') ? 'slide' : 'page';
+  const embeddedTexts = toEmbed.map((i) => {
+    const c = rawChunks[i];
+    const label = pageRangeLabel(c.pageNumber, c.pageEnd, unit);
+    return `${header}${label ? ` · ${label}` : ''}\n${c.content}`;
+  });
 
-  const embeddings = await batchEmbed(embeddedTexts, settings, 'document');
+  const fresh = embeddedTexts.length > 0 ? await batchEmbed(embeddedTexts, settings, 'document') : [];
+  const freshByIndex = new Map(toEmbed.map((chunkIdx, k) => [chunkIdx, fresh[k]]));
 
   await storeChunksWithEmbeddings({
     docId: source.docId,
@@ -91,9 +122,11 @@ export async function indexDocumentJustInTime(target: IndexTarget, settings: App
     chunks: rawChunks.map((c, idx) => ({
       chunkIndex: c.chunkIndex,
       pageNumber: c.pageNumber,
+      pageEnd: c.pageEnd,
       content: c.content,
+      contentHash: hashes[idx],
       tokenCount: c.tokenCount,
-      embedding: embeddings[idx],
+      embedding: freshByIndex.get(idx) ?? reusable.get(hashes[idx])!,
     })),
   });
 
@@ -103,6 +136,7 @@ export async function indexDocumentJustInTime(target: IndexTarget, settings: App
     sourceType: target.sourceType,
     title: source.title,
     chunksCount: rawChunks.length,
+    chunksEmbedded: toEmbed.length,
     htmlUrl: source.htmlUrl,
   };
 }
@@ -182,36 +216,30 @@ async function loadDocumentSource(target: IndexTarget): Promise<DocumentSource> 
 
   if (sourceType === 'page') {
     if (!courseId) throw new Error('course_id is required to index a page');
-    const page = await canvasGet<CanvasPage>(
-      `/courses/${courseId}/pages/${encodeURIComponent(sourceId)}`,
-      `page "${sourceId}" in course ${courseId}`
-    );
+    const page = await fetchPage(courseId, sourceId);
+    // The body is in hand: record its links now so what it points at becomes discoverable
+    const text = await ingestHtml(courseId, 'page', sourceId, page.body);
     return {
       docId: docIdFor('page', sourceId, courseId),
       title: page.title || sourceId,
       version: page.updated_at || '1',
       htmlUrl: page.html_url || null,
       courseId: String(courseId),
-      loadPages: async () => {
-        const text = htmlToText(page.body || '');
-        return text ? [{ pageNumber: 1, text }] : [];
-      },
+      loadPages: async () => (text ? [{ pageNumber: 1, text }] : []),
     };
   }
 
   if (sourceType === 'assignment') {
     if (!courseId) throw new Error('course_id is required to index an assignment description');
     const a = await fetchAssignmentWithDescription(courseId, sourceId);
+    const text = await ingestHtml(courseId, 'assignment', sourceId, a.description);
     return {
       docId: docIdFor('assignment', sourceId),
       title: a.name ? `${a.name} (assignment description)` : `Assignment ${sourceId}`,
       version: a.updated_at || '1',
       htmlUrl: a.html_url || null,
       courseId: String(courseId),
-      loadPages: async () => {
-        const text = htmlToText(a.description || '');
-        return text ? [{ pageNumber: 1, text }] : [];
-      },
+      loadPages: async () => (text ? [{ pageNumber: 1, text }] : []),
     };
   }
 
@@ -220,6 +248,21 @@ async function loadDocumentSource(target: IndexTarget): Promise<DocumentSource> 
   }
 
   throw new Error(`Unsupported source type: ${sourceType}`);
+}
+
+/**
+ * A wiki page with its body. When a course hides its Pages area, Canvas can still refuse a slug
+ * fetch for the front page while serving it through /front_page, so that is tried second.
+ */
+async function fetchPage(courseId: string, slug: string): Promise<CanvasPage> {
+  try {
+    return await canvasGet<CanvasPage>(`/courses/${courseId}/pages/${encodeURIComponent(slug)}`, `page "${slug}" in course ${courseId}`);
+  } catch (e) {
+    if (!(e instanceof CanvasHttpError) || (e.status !== 403 && e.status !== 404)) throw e;
+    const front = await canvasGet<CanvasPage>(`/courses/${courseId}/front_page`, `front page of course ${courseId}`).catch(() => null);
+    if (front?.url === slug) return front;
+    throw e;
+  }
 }
 
 /**

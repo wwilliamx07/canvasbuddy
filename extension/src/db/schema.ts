@@ -12,6 +12,7 @@ CREATE TABLE IF NOT EXISTS courses (
   name          TEXT NOT NULL,
   course_code   TEXT,
   term          TEXT,
+  default_view  TEXT,        -- what "Home" shows: wiki | modules | syllabus | assignments | feed
   synced_at     TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
   -- Per-collection sync markers so staleness can be judged even when a collection is empty
   modules_synced_at     TIMESTAMPTZ,
@@ -139,6 +140,7 @@ CREATE TABLE IF NOT EXISTS pages (
   title         TEXT NOT NULL,
   updated_at    TEXT,
   html_url      TEXT,
+  front_page    BOOLEAN NOT NULL DEFAULT FALSE,
   synced_at     TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (course_id, page_url)
 );
@@ -179,8 +181,10 @@ CREATE TABLE IF NOT EXISTS file_chunks (
   file_id       TEXT REFERENCES files(file_id) ON DELETE CASCADE,
   chunk_index   INT NOT NULL,
   page_number   INT,
+  page_end      INT,             -- last page/slide covered when small pages were merged (NULL = page_number)
   content       TEXT NOT NULL,
   token_count   INT,
+  content_hash  TEXT,            -- sha-256 of content; lets a re-index reuse vectors of unchanged chunks
   embedding     VECTOR(768),
   content_tsv   TSVECTOR       -- full-text index for hybrid (keyword + vector) search
 );
@@ -196,7 +200,34 @@ CREATE TABLE IF NOT EXISTS sync_state (
   error       TEXT
 );
 
+-- 10. Course navigation (Tabs API): what the course's nav bar offers, incl. external tools.
+CREATE TABLE IF NOT EXISTS course_tabs (
+  course_id TEXT REFERENCES courses(course_id) ON DELETE CASCADE,
+  tab_id    TEXT NOT NULL,
+  label     TEXT NOT NULL,
+  type      TEXT,             -- 'internal' | 'external'
+  html_url  TEXT,
+  position  INT,
+  PRIMARY KEY (course_id, tab_id)
+);
+
+-- 11. Hyperlinks found in HTML bodies (front page, wiki pages, assignment descriptions,
+--     announcements). This is how content the instructor organised as "a page with links"
+--     becomes discoverable when the Files/Pages areas are hidden from students.
+CREATE TABLE IF NOT EXISTS content_links (
+  course_id TEXT REFERENCES courses(course_id) ON DELETE CASCADE,
+  from_type TEXT NOT NULL,    -- 'page' | 'assignment' | 'announcement'
+  from_id   TEXT NOT NULL,    -- page slug / assignment id / announcement id
+  to_type   TEXT NOT NULL,    -- 'file' | 'page' | 'assignment' | 'quiz' | 'discussion' | 'module' | 'external'
+  to_ref    TEXT NOT NULL,    -- file id / page slug / assignment id / … / URL
+  label     TEXT,
+  position  INT NOT NULL,
+  PRIMARY KEY (course_id, from_type, from_id, position)
+);
+
 -- Migrations for databases created by earlier versions (all idempotent)
+ALTER TABLE courses     ADD COLUMN IF NOT EXISTS default_view TEXT;   -- what "Home" shows: wiki | modules | syllabus | assignments | feed
+ALTER TABLE pages       ADD COLUMN IF NOT EXISTS front_page   BOOLEAN NOT NULL DEFAULT FALSE;
 ALTER TABLE courses     ADD COLUMN IF NOT EXISTS modules_synced_at     TIMESTAMPTZ;
 ALTER TABLE courses     ADD COLUMN IF NOT EXISTS assignments_synced_at TIMESTAMPTZ;
 ALTER TABLE courses     ADD COLUMN IF NOT EXISTS files_synced_at       TIMESTAMPTZ;
@@ -216,6 +247,8 @@ ALTER TABLE files       ADD COLUMN IF NOT EXISTS size            BIGINT;
 ALTER TABLE files       ALTER COLUMN extracted_at DROP DEFAULT;
 ALTER TABLE file_chunks ADD COLUMN IF NOT EXISTS content_tsv TSVECTOR;
 UPDATE file_chunks SET content_tsv = to_tsvector('english', content) WHERE content_tsv IS NULL;
+ALTER TABLE file_chunks ADD COLUMN IF NOT EXISTS page_end     INT;
+ALTER TABLE file_chunks ADD COLUMN IF NOT EXISTS content_hash TEXT;
 
 -- Carry the legacy per-collection stamps on courses into sync_state (columns are kept, unused).
 INSERT INTO sync_state (scope, synced_at, probed_at)
@@ -239,6 +272,9 @@ CREATE INDEX IF NOT EXISTS idx_graph_edges_from ON graph_edges(from_type, from_i
 CREATE INDEX IF NOT EXISTS idx_graph_edges_to ON graph_edges(to_type, to_id);
 CREATE INDEX IF NOT EXISTS idx_file_chunks_file ON file_chunks(file_id);
 CREATE INDEX IF NOT EXISTS idx_file_chunks_tsv ON file_chunks USING GIN(content_tsv);
+-- Approximate nearest-neighbour index for the vector half of hybrid search (cosine, matches <=>).
+-- Filtered searches rely on hnsw.iterative_scan (set in pglite.ts) so a course filter cannot starve the LIMIT.
+CREATE INDEX IF NOT EXISTS idx_file_chunks_embedding ON file_chunks USING hnsw (embedding vector_cosine_ops);
 CREATE INDEX IF NOT EXISTS idx_files_course ON files(course_id);
 CREATE INDEX IF NOT EXISTS idx_pages_course ON pages(course_id);
 CREATE INDEX IF NOT EXISTS idx_submissions_course ON submissions(course_id);
@@ -246,5 +282,6 @@ CREATE INDEX IF NOT EXISTS idx_announcements_course ON announcements(course_id, 
 CREATE INDEX IF NOT EXISTS idx_planner_date ON planner_items(date);
 CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_messages_tsv ON messages USING GIN(body_tsv);
+CREATE INDEX IF NOT EXISTS idx_content_links_to ON content_links(course_id, to_type, to_ref);
 `;
 

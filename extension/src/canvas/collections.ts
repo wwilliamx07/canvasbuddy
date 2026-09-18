@@ -9,7 +9,7 @@ import {
   type SyncState,
 } from './freshness';
 import { canvasGet, fetchAllPages, CanvasHttpError } from './http';
-import { withTransaction } from '../db/pglite';
+import { withTransaction, type Queryable } from '../db/pglite';
 import {
   upsertCourses,
   upsertAndPruneModules,
@@ -22,7 +22,11 @@ import {
   upsertAndPruneConversations,
   upsertMessages,
   getConversationSubject,
+  replaceCourseTabs,
+  setFrontPage,
+  storeContentLinks,
 } from '../db/graph';
+import { ingestHtml } from './links';
 import {
   docIdFor,
   upsertAndPruneKnownFiles,
@@ -31,10 +35,11 @@ import {
   setChunkEmbeddings,
 } from '../db/rag';
 import { batchEmbed, resolveEmbeddingModel } from '../embeddings/embeddingClient';
-import { htmlToText } from '../utils/textExtractor';
+import { htmlToTextWithLinks } from '../utils/canvasLinks';
 import type { AppSettings } from '../components/Settings/Settings';
 import type {
   CanvasCourse,
+  CanvasTab,
   CanvasModule,
   CanvasModuleItem,
   CanvasAssignment,
@@ -58,6 +63,7 @@ import type {
  *   inbox         newest last_message_at → per-conversation thread fetch                    ✓
  *   files, pages  newest updated_at via sort=updated_at — unverified (403/404 on all probed
  *                 courses); feature-detected, falls back to TTL
+ *   home          front page updated_at (the probe fetch doubles as the sync's input)          ✓
  *   courses, assignments, submissions, planner — no narrow query exists; TTL only
  */
 
@@ -83,7 +89,20 @@ const courses: CollectionSpec = {
       'courses'
     );
     const valid = data.filter((c) => c && c.id && c.name);
-    await withTransaction((tx) => upsertCourses(valid, tx));
+    // The nav bar tells the model what each course offers (incl. external tools such as Piazza
+    // or lecture-capture) and is one small request per course at the courses TTL.
+    const tabs = new Map<string, CanvasTab[]>();
+    for (const c of valid) {
+      try {
+        tabs.set(String(c.id), await canvasGet<CanvasTab[]>(`/courses/${c.id}/tabs`, `tabs for course ${c.id}`));
+      } catch (e) {
+        if (!(e instanceof CanvasHttpError)) throw e;
+      }
+    }
+    await withTransaction(async (tx) => {
+      await upsertCourses(valid, tx);
+      for (const [courseId, list] of tabs) await replaceCourseTabs(courseId, list, tx);
+    });
     return { summary: `${valid.length} active courses` };
   },
 };
@@ -310,13 +329,13 @@ interface CanvasAnnouncement {
 
 const ANNOUNCEMENT_TEXT_MAX = 4000;
 
-function shapeAnnouncement(a: CanvasAnnouncement): ShapedAnnouncement {
+async function shapeAnnouncement(courseId: string, a: CanvasAnnouncement, tx: Queryable): Promise<ShapedAnnouncement> {
   return {
     announcement_id: String(a.id),
     title: a.title || '(untitled)',
     posted_at: a.posted_at ?? null,
     author: a.author?.display_name || a.user_name || null,
-    text: clip(htmlToText(a.message || ''), ANNOUNCEMENT_TEXT_MAX) || '',
+    text: clip(await ingestHtml(courseId, 'announcement', String(a.id), a.message, tx), ANNOUNCEMENT_TEXT_MAX) || '',
     html_url: a.html_url || null,
   };
 }
@@ -335,8 +354,11 @@ const announcements: CollectionSpec = {
     // Newest 100 is plenty; older ones are pruned (the prune only sees what was fetched)
     const list = await fetchAllPages<CanvasAnnouncement>(
       `/courses/${courseId}/discussion_topics?only_announcements=true&per_page=50`, `announcements for course ${courseId}`, 2);
-    const rows = list.map(shapeAnnouncement);
-    const r = await withTransaction((tx) => upsertAndPruneAnnouncements(courseId, rows, tx));
+    const r = await withTransaction(async (tx) => {
+      const rows: ShapedAnnouncement[] = [];
+      for (const a of list) rows.push(await shapeAnnouncement(courseId, a, tx));
+      return upsertAndPruneAnnouncements(courseId, rows, tx);
+    });
     const marker = list[0] ? `${list[0].id}:${list[0].posted_at}` : 'empty';
     return { fingerprint: marker, summary: `${r.upserted} announcements` };
   },
@@ -527,6 +549,46 @@ const inbox: CollectionSpec = {
 };
 
 // ---------------------------------------------------------------------------
+// home — the course front page and the files/pages it links to
+// ---------------------------------------------------------------------------
+
+/** The front page, or null when the course has none (404). Other errors propagate. */
+async function fetchFrontPage(courseId: string): Promise<CanvasPage | null> {
+  try {
+    return await canvasGet<CanvasPage>(`/courses/${courseId}/front_page`, `front page of course ${courseId}`);
+  } catch (e) {
+    if (e instanceof CanvasHttpError && e.status === 404) return null;
+    throw e;
+  }
+}
+
+const home: CollectionSpec = {
+  kind: 'home',
+  // The front page is small; the probe fetch is reused as the sync input when it changed.
+  probe: async (ctx, state) => {
+    const courseId = requireCourse(ctx, 'home');
+    const page = await fetchFrontPage(courseId);
+    const marker = page ? page.updated_at || 'unknown' : 'none';
+    return marker === state.fingerprint ? { kind: 'unchanged' } : { kind: 'changed', data: page };
+  },
+  sync: async (ctx, info) => {
+    const courseId = requireCourse(ctx, 'home');
+    const page = info.probeData !== undefined ? (info.probeData as CanvasPage | null) : await fetchFrontPage(courseId);
+    const links = await withTransaction(async (tx) => {
+      await setFrontPage(courseId, page, tx);
+      if (!page?.url) return 0;
+      const { links } = htmlToTextWithLinks(page.body || '', courseId);
+      await storeContentLinks(courseId, 'page', page.url, links, tx);
+      return links.length;
+    });
+    return {
+      fingerprint: page ? page.updated_at || 'unknown' : 'none',
+      summary: page ? `front page "${page.title}", ${links} links` : 'no front page',
+    };
+  },
+};
+
+// ---------------------------------------------------------------------------
 // registry
 // ---------------------------------------------------------------------------
 
@@ -540,6 +602,7 @@ export const COLLECTIONS: Record<CollectionKind, CollectionSpec> = {
   announcements,
   planner,
   inbox,
+  home,
 };
 
 /** Bring one collection up to date according to the freshness policy. */

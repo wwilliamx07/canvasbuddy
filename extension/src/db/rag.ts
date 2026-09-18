@@ -1,4 +1,4 @@
-import { getDB, q, type Queryable } from './pglite';
+import { getDB, q, withTransaction, type Queryable } from './pglite';
 import type { CanvasFile, RetrievedChunk } from '../types/canvas';
 
 export type DocumentSourceType = 'file' | 'page' | 'assignment' | 'conversation';
@@ -47,8 +47,9 @@ export async function getDocumentCacheState(
 
 /**
  * Records Canvas files that exist in a course without indexing them (total_chunks stays 0),
- * and removes files that no longer exist in Canvas. Indexed rows keep their chunks unless
- * the file was deleted upstream or its version changed.
+ * and removes files that no longer exist in Canvas. A version change resets total_chunks to 0,
+ * which hides the old chunks from search and reads; the rows themselves are kept so the next
+ * index can reuse the vectors of pages that did not change.
  */
 export async function upsertAndPruneKnownFiles(
   courseId: string,
@@ -88,23 +89,20 @@ export async function upsertAndPruneKnownFiles(
       ]
     );
   }
-  // Chunks of files whose version moved are stale: drop them so they stop surfacing in search
-  await db.query(
-    `DELETE FROM file_chunks WHERE file_id IN (SELECT file_id FROM files WHERE course_id = $1 AND source_type = 'file' AND total_chunks = 0)`,
-    [String(courseId)]
-  );
-
+  // A file is pruned only when neither the Files listing nor any link in the course still names
+  // it: instructors link files that live in other courses' (or their own) file areas.
+  const linked = `file_id IN (SELECT to_ref FROM content_links WHERE course_id = $1 AND to_type = 'file')`;
   let pruned = 0;
   if (validIds.length > 0) {
     const placeholders = validIds.map((_, i) => `$${i + 2}`).join(',');
     const res = await db.query(
-      `DELETE FROM files WHERE course_id = $1 AND source_type = 'file' AND file_id NOT IN (${placeholders}) RETURNING file_id`,
+      `DELETE FROM files WHERE course_id = $1 AND source_type = 'file' AND file_id NOT IN (${placeholders}) AND NOT ${linked} RETURNING file_id`,
       [String(courseId), ...validIds]
     );
     pruned = res.rows.length;
   } else {
     const res = await db.query(
-      `DELETE FROM files WHERE course_id = $1 AND source_type = 'file' RETURNING file_id`,
+      `DELETE FROM files WHERE course_id = $1 AND source_type = 'file' AND NOT ${linked} RETURNING file_id`,
       [String(courseId)]
     );
     pruned = res.rows.length;
@@ -114,9 +112,32 @@ export async function upsertAndPruneKnownFiles(
 }
 
 /**
+ * PGlite runs no autovacuum launcher, so planner statistics never refresh on their own; the
+ * keyword half of hybrid search and its joins are planned from them. ANALYZE costs ~ms.
+ */
+async function refreshChunkStats(db: Queryable): Promise<void> {
+  await db.query('ANALYZE file_chunks');
+}
+
+/**
+ * Vectors already stored for a document, keyed by chunk content hash, so a re-index can keep
+ * them for chunks whose text did not change. Only meaningful when the caller has checked that
+ * the stored `embedding_model` matches the current one. Values are pgvector literals.
+ */
+export async function getStoredEmbeddingsByHash(docId: string): Promise<Map<string, string>> {
+  const db = await getDB();
+  const res = await db.query<{ content_hash: string; embedding: string }>(
+    'SELECT content_hash, embedding::text AS embedding FROM file_chunks WHERE file_id = $1 AND content_hash IS NOT NULL AND embedding IS NOT NULL',
+    [String(docId)]
+  );
+  return new Map(res.rows.map((r) => [r.content_hash, r.embedding]));
+}
+
+/**
  * Stores document metadata and replaces its text chunks with 768d vector embeddings.
  * `content` is the raw chunk text shown to the user; `embeddedText` (header + content) is what
- * the vector was computed from and is not stored.
+ * the vector was computed from and is not stored. `embedding` is either a fresh vector or a
+ * literal reused from `getStoredEmbeddingsByHash`.
  */
 export async function storeChunksWithEmbeddings(params: {
   docId: string;
@@ -130,9 +151,11 @@ export async function storeChunksWithEmbeddings(params: {
   chunks: Array<{
     chunkIndex: number;
     pageNumber?: number | null;
+    pageEnd?: number | null;
     content: string;
+    contentHash?: string | null;
     tokenCount?: number;
-    embedding: number[];
+    embedding: number[] | string;
   }>;
 }): Promise<number> {
   const { docId, sourceType, courseId, filename, displayName, version, embeddingModel, htmlUrl, chunks } = params;
@@ -172,20 +195,23 @@ export async function storeChunksWithEmbeddings(params: {
   for (const chunk of chunks) {
     const chunkId = `${docId}-chunk-${chunk.chunkIndex}`;
     await db.query(
-      `INSERT INTO file_chunks (chunk_id, file_id, chunk_index, page_number, content, token_count, embedding, content_tsv)
-       VALUES ($1, $2, $3, $4, $5, $6, $7::vector, to_tsvector('english', $5))`,
+      `INSERT INTO file_chunks (chunk_id, file_id, chunk_index, page_number, page_end, content, content_hash, token_count, embedding, content_tsv)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::vector, to_tsvector('english', $6))`,
       [
         chunkId,
         String(docId),
         chunk.chunkIndex,
         chunk.pageNumber != null ? chunk.pageNumber : null,
+        chunk.pageEnd ?? chunk.pageNumber ?? null,
         chunk.content,
+        chunk.contentHash ?? null,
         chunk.tokenCount || 0,
-        formatVector(chunk.embedding),
+        typeof chunk.embedding === 'string' ? chunk.embedding : formatVector(chunk.embedding),
       ]
     );
   }
 
+  await refreshChunkStats(db);
   return chunks.length;
 }
 
@@ -235,6 +261,7 @@ export async function upsertDocumentChunksIncremental(params: {
     'UPDATE files SET total_chunks = (SELECT COUNT(*) FROM file_chunks WHERE file_id = $1) WHERE file_id = $1',
     [String(docId)]
   );
+  await refreshChunkStats(db);
   return { inserted };
 }
 
@@ -258,13 +285,19 @@ export async function setChunkEmbeddings(
     await db.query('UPDATE file_chunks SET embedding = $2::vector WHERE chunk_id = $1', [r.chunkId, formatVector(r.embedding)]);
   }
   await db.query('UPDATE files SET embedding_model = $2 WHERE file_id = $1', [String(docId), embeddingModel]);
+  await refreshChunkStats(db);
 }
 
 /**
  * Hybrid retrieval: vector similarity (<=>) fused with Postgres full-text search via
  * reciprocal rank fusion. Course material is full of exact tokens ("Theorem 3.2", "Q4(b)")
  * where keyword match beats embeddings, and vice versa for paraphrased questions.
- * `docId` restricts the search to one document.
+ * `docId` restricts the search to one document. Only documents with total_chunks > 0 take part:
+ * chunks of an outdated version are kept as a vector cache but must not surface.
+ *
+ * The vector half always walks the HNSW index: `enable_sort = off` for this statement makes the
+ * planner prefer the index's ordered scan over "scan + sort" at any table size (the keyword half
+ * still sorts, as it must). Filters are satisfied by hnsw.iterative_scan (set in pglite.ts).
  */
 export async function searchChunksHybrid(
   queryText: string,
@@ -273,7 +306,6 @@ export async function searchChunksHybrid(
   limit: number = 5,
   docId?: string | null
 ): Promise<RetrievedChunk[]> {
-  const db = await getDB();
   const vectorStr = formatVector(queryVector);
   const candidates = Math.max(20, limit * 4);
 
@@ -284,6 +316,7 @@ export async function searchChunksHybrid(
       JOIN files f ON f.file_id = fc.file_id
       WHERE ($2::text IS NULL OR f.course_id = $2)
         AND ($6::text IS NULL OR f.file_id = $6)
+        AND f.total_chunks > 0
         AND fc.embedding IS NOT NULL
       ORDER BY fc.embedding <=> $1::vector
       LIMIT $4
@@ -296,6 +329,7 @@ export async function searchChunksHybrid(
       WHERE fc.content_tsv @@ q
         AND ($2::text IS NULL OR f.course_id = $2)
         AND ($6::text IS NULL OR f.file_id = $6)
+        AND f.total_chunks > 0
       ORDER BY ts_rank_cd(fc.content_tsv, q) DESC
       LIMIT $4
     ),
@@ -308,6 +342,7 @@ export async function searchChunksHybrid(
       fc.chunk_id,
       fc.chunk_index,
       fc.page_number,
+      COALESCE(fc.page_end, fc.page_number) AS page_end,
       fc.content,
       COALESCE(1 - (fc.embedding <=> $1::vector), 0) AS similarity,
       fused.score AS fused_score,
@@ -336,12 +371,16 @@ export async function searchChunksHybrid(
     LIMIT $5;
   `;
 
-  const res = await db.query(query, [vectorStr, courseId || null, queryText, candidates, limit, docId || null]);
+  const res = await withTransaction(async (tx) => {
+    await tx.query('SET LOCAL enable_sort = off');
+    return tx.query(query, [vectorStr, courseId || null, queryText, candidates, limit, docId || null]);
+  });
 
   return res.rows.map((row: any) => ({
     chunk_id: row.chunk_id,
     chunk_index: Number(row.chunk_index),
     page_number: row.page_number != null ? Number(row.page_number) : undefined,
+    page_end: row.page_end != null ? Number(row.page_end) : undefined,
     content: row.content,
     similarity: Number(row.similarity),
     filename: row.filename,
@@ -372,19 +411,20 @@ export async function getFilesList(courseId?: string): Promise<any[]> {
 }
 
 /**
- * Chunks of a document in order, optionally restricted to a page/slide range.
+ * Chunks of an indexed document in order, optionally restricted to a page/slide range (a chunk
+ * is included when its page range overlaps the requested one). Chunks of a document whose
+ * total_chunks is 0 (outdated version awaiting re-index) are not returned.
  */
 export async function getFileChunks(docId: string, pageRange?: { from: number; to: number }): Promise<any[]> {
   const db = await getDB();
-  const res = pageRange
-    ? await db.query(
-        'SELECT chunk_id, chunk_index, page_number, content, token_count FROM file_chunks WHERE file_id = $1 AND page_number BETWEEN $2 AND $3 ORDER BY chunk_index ASC',
-        [String(docId), pageRange.from, pageRange.to]
-      )
-    : await db.query(
-        'SELECT chunk_id, chunk_index, page_number, content, token_count FROM file_chunks WHERE file_id = $1 ORDER BY chunk_index ASC',
-        [String(docId)]
-      );
+  const res = await db.query(
+    `SELECT fc.chunk_id, fc.chunk_index, fc.page_number, COALESCE(fc.page_end, fc.page_number) AS page_end, fc.content, fc.token_count
+     FROM file_chunks fc JOIN files f ON f.file_id = fc.file_id
+     WHERE fc.file_id = $1 AND f.total_chunks > 0
+       AND ($2::int IS NULL OR (fc.page_number <= $3 AND COALESCE(fc.page_end, fc.page_number) >= $2))
+     ORDER BY fc.chunk_index ASC`,
+    [String(docId), pageRange?.from ?? null, pageRange?.to ?? null]
+  );
   return res.rows;
 }
 
@@ -392,7 +432,7 @@ export async function getFileChunks(docId: string, pageRange?: { from: number; t
 export async function getDocumentPageCount(docId: string): Promise<number | null> {
   const db = await getDB();
   const res = await db.query<{ max: number | string | null }>(
-    'SELECT MAX(page_number) AS max FROM file_chunks WHERE file_id = $1',
+    'SELECT MAX(COALESCE(page_end, page_number)) AS max FROM file_chunks WHERE file_id = $1',
     [String(docId)]
   );
   return res.rows[0]?.max == null ? null : Number(res.rows[0].max);

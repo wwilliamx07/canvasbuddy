@@ -17,7 +17,8 @@ export type CollectionKind =
   | 'submissions'
   | 'announcements'
   | 'planner'
-  | 'inbox';
+  | 'inbox'
+  | 'home';
 
 /** All values in minutes. Editable in Settings; merged over DEFAULT_FRESHNESS. */
 export interface FreshnessSettings {
@@ -30,6 +31,8 @@ export interface FreshnessSettings {
   announcements: number;
   planner: number;
   inbox: number;
+  /** The course front page and the files/pages it links to. */
+  home: number;
   /** Skip re-probing a scope that was checked this recently (one tool loop touches a scope many times). */
   probeDebounce: number;
   /** How long to remember that a course hides a collection (403/404) before trying again. */
@@ -48,6 +51,7 @@ export const DEFAULT_FRESHNESS: FreshnessSettings = {
   announcements: 30,
   planner: 15,
   inbox: 15,
+  home: 1 * D,
   probeDebounce: 3,
   unavailableRetry: 1 * D,
 };
