@@ -4,13 +4,14 @@ Sources: `src/db/pglite.ts`, `src/db/schema.ts`, `src/db/graph.ts`, `src/canvas/
 
 ## Why a local Postgres
 
-The graph is a **cache of Canvas structure** that makes most agent questions answerable without a network call and with compact, filterable rows. Postgres (via PGlite, compiled to WASM) was chosen over a key-value store because the queries are relational (joins across modules → items → files, staleness computed from timestamps) and because pgvector + full-text search give hybrid RAG in the same engine. Everything persists to IndexedDB at `idb://canvas-buddy-db`.
+The graph is a **cache of Canvas structure** that makes most agent questions answerable without a network call and with compact, filterable rows. Postgres (via PGlite, compiled to WASM) was chosen over a key-value store because the queries are relational (joins across modules → items → files, staleness computed from timestamps) and because pgvector + full-text search give hybrid RAG in the same engine. Everything persists to IndexedDB, **one database per Canvas identity** (`idb://<dbName>`, see below).
 
 ## Database lifecycle (`db/pglite.ts`)
 
+- **One database per identity.** `canvas/identity.ts` resolves who is signed in (`GET /users/self` → `<host>/<userId>`, name) and keeps a registry in `localStorage['canvas-buddy-memories']` mapping each identity to a `dbName` and a chats key. IndexedDB databases cannot be renamed, so the first identity the browser ever sees adopts the legacy names (`canvas-buddy-db`, `canvas-buddy-chats`); later ones get `canvas-buddy-<host>-<userId>`. `App` calls `configureDatabase(dbName)` before anything touches the database; `getDB()` throws until then. A signed-out session falls back to the last identity seen on that host (banner: "showing what's remembered for …"); a *different* account signing in mid-session is reported ("Reload to switch memory"), never mixed in. "Forget this memory" (Settings) closes the database (`closeDB`), deletes every IndexedDB database whose name ends with the data dir, removes the chats key and the registry entry, and reloads.
 - `getDB()` returns a process-wide singleton; concurrent callers share one init promise.
 - Init runs `SCHEMA_SQL` every time. The schema is written to be **idempotent** (`CREATE … IF NOT EXISTS`, `ALTER TABLE … ADD COLUMN IF NOT EXISTS`), so migrations are just appended to `schema.ts`.
-- **Exclusive Web Lock.** PGlite's IndexedDB filesystem is not safe to open from two pages at once, and Chrome opens one side panel per window. `acquireExclusiveLock` requests `navigator.locks` `canvas-buddy-pglite` with `ifAvailable: true` and holds it for the page lifetime. A second panel throws a clear "already open in another window" error instead of corrupting the database.
+- **Exclusive Web Lock.** PGlite's IndexedDB filesystem is not safe to open from two pages at once, and Chrome opens one side panel per window. `acquireExclusiveLock` requests `navigator.locks` `canvas-buddy-pglite:<dbName>` with `ifAvailable: true` and holds it for the page lifetime. A second panel throws a clear "already open in another window" error instead of corrupting the database.
 
 ## Schema
 

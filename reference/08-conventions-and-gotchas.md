@@ -4,7 +4,8 @@ Things that are easy to break because the reason for them is not visible at the 
 
 ## Database
 
-- **Never open PGlite from a second page.** `getDB()` takes a page-lifetime Web Lock; a second side panel (another browser window) gets an error by design. Do not "fix" this by removing the lock — the IndexedDB VFS will corrupt.
+- **Never open PGlite from a second page.** `getDB()` takes a page-lifetime Web Lock (per database name); a second side panel (another browser window) gets an error by design. Do not "fix" this by removing the lock — the IndexedDB VFS will corrupt.
+- **Never name the database yourself.** The data dir comes from the identity's memory slot (`canvas/identity.ts`) through `configureDatabase`; `getDB()` throws before that. The first identity seen adopts the legacy `canvas-buddy-db` on purpose (IndexedDB cannot rename), so don't "migrate" it. Switching identity in one page is not supported — reload.
 - **Schema changes go in `schema.ts` as idempotent statements.** `SCHEMA_SQL` runs on every start. Use `CREATE TABLE IF NOT EXISTS`, `ADD COLUMN IF NOT EXISTS`, `CREATE INDEX IF NOT EXISTS`. There is no migration version table.
 - **`VECTOR(768)` is fixed.** Both embedding providers are asked for 768 dimensions. Changing it means a migration and a full re-index.
 - **Stringify ids.** Every Canvas id is stored and compared as `TEXT`. Always wrap with `String(...)` before passing to SQL; mixing numbers in causes silent non-matches.

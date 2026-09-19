@@ -19,7 +19,7 @@ Design constraints that shape everything:
 | Permissions | `sidePanel`, `activeTab`; `optional_host_permissions: https://*/*` — no fixed host | The Canvas origin is requested at runtime from the Connect screen (`chrome.permissions.request`, a user gesture) and re-checked on every start. `activeTab` lets the panel prefill the host from the tab the icon was clicked on. Persistence uses localStorage and IndexedDB, so no `storage` permission is needed. |
 | CSP | `script-src 'self' 'wasm-unsafe-eval'` | Required for PGlite's WASM. Inline scripts are blocked. |
 | UI | React 19, TypeScript, Tailwind v4 (`@tailwindcss/postcss`), `lucide-react` icons, `marked` for Markdown, `katex` for math | |
-| Database | `@electric-sql/pglite` + `@electric-sql/pglite-pgvector`, persisted at `idb://canvas-buddy-db` | Postgres compiled to WASM. See `04-knowledge-graph.md`. |
+| Database | `@electric-sql/pglite` + `@electric-sql/pglite-pgvector`, one database per Canvas identity (`idb://<dbName>` from `canvas/identity.ts`) | Postgres compiled to WASM. See `04-knowledge-graph.md`. |
 | Document parsing | `pdfjs-dist` (worker bundled via `?url` import), `jszip` for PPTX | See `05-rag.md`. |
 | Build | Vite 8 + `vite-plugin-web-extension` | `npm run build` → `extension/dist`, load unpacked. A small custom plugin strips a `__vite-browser-external` chunk that Vite emits for Node shims. `optimizeDeps.exclude` keeps PGlite out of pre-bundling. |
 | TypeScript | Project references: `tsconfig.app.json` (browser, `types: ["vite/client", "chrome"]`) and `tsconfig.node.json` (Vite config) | Strict, `noUnusedLocals`, `verbatimModuleSyntax`. |
@@ -53,6 +53,7 @@ canvasbuddy/
         │   ├── http.ts        ← configureCanvas/canvasHost/canvasBase, canvasGet, fetchAllPages, CanvasHttpError
         │   ├── profiles.ts    ← deployment profiles (quercus, generic): name, internal hosts, origins, prompt intro
         │   ├── connection.ts  ← origin permission check/request, session verification, activeTab host
+        │   ├── identity.ts    ← who is signed in (/users/self), memory registry (<host>/<userId> → db + chats key), forget
         │   ├── freshness.ts   ← ensureCurrent: TTL / probe / debounce / unavailable policy, sync_state
         │   ├── collections.ts ← registry: fetch + probe + shape + upsert for all 10 collections
         │   ├── links.ts       ← ingestHtml: HTML body → text with link markers + content_links rows
@@ -96,8 +97,9 @@ Two clients share the same data layer: the **agent** (via tools) and the **Graph
 
 | Data | Where | Format |
 |---|---|---|
-| Chats (display messages, model-facing history with capped tool turns, context digests) | `localStorage['canvas-buddy-chats']` | JSON array of `Chat` |
+| Chats (display messages, model-facing history with capped tool turns, context digests) | `localStorage[<slot.chatsKey>]` — `canvas-buddy-chats` for the first identity seen, `canvas-buddy-chats:<host>/<userId>` after | JSON array of `Chat` |
+| Memory registry (identity → database name, chats key, since) and last identity per host | `localStorage['canvas-buddy-memories']`, `localStorage['canvas-buddy-identity']` | JSON |
 | Settings (provider, key, model, embedding model, threshold, freshness TTLs, `canvasHost`) | `localStorage['canvas-buddy-settings']` | JSON `AppSettings` |
-| Knowledge graph + vectors | IndexedDB via PGlite (`idb://canvas-buddy-db`) | Postgres tables, see `04-knowledge-graph.md` |
+| Knowledge graph + vectors | IndexedDB via PGlite (`idb://<slot.dbName>`: `canvas-buddy-db` for the first identity, `canvas-buddy-<host>-<userId>` after) | Postgres tables, see `04-knowledge-graph.md` |
 
 The API key is stored in plain localStorage; the settings page states it "never leaves the browser", which is true — it is only sent to the chosen LLM provider.

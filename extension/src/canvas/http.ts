@@ -35,11 +35,30 @@ export function isUnavailableError(e: unknown): boolean {
   return e instanceof CanvasHttpError && (e.status === 403 || e.status === 404);
 }
 
+let sessionListener: (() => void) | null = null;
+
+/** Called (once per request) when Canvas answers with a sign-in page instead of JSON. */
+export function onSessionLost(listener: (() => void) | null): void {
+  sessionListener = listener;
+}
+
+/**
+ * A signed-out session gets a 200 HTML login page, not an error status. Detecting it here keeps
+ * every sync from failing on a JSON parse and lets the app re-check who is signed in (the user
+ * may have switched accounts, which must not be mixed into this identity's memory).
+ */
+function assertJson(response: Response, label: string): void {
+  if (/application\/json/i.test(response.headers.get('content-type') || '')) return;
+  sessionListener?.();
+  throw new Error(`Canvas returned a sign-in page instead of ${label}; sign in to ${canvasHost()} and try again`);
+}
+
 /** GET with the browser's Canvas session; throws CanvasHttpError on non-OK. */
 export async function canvasGet<T = unknown>(path: string, label: string): Promise<T> {
   const url = path.startsWith('http') ? path : `${canvasBase()}${path}`;
   const response = await fetch(url, { credentials: 'include' });
   if (!response.ok) throw new CanvasHttpError(response.status, response.statusText, label);
+  assertJson(response, label);
   return (await response.json()) as T;
 }
 
@@ -58,6 +77,7 @@ export async function fetchAllPages<T>(path: string, label: string, maxPages = 1
   while (next && guard++ < maxPages) {
     const response: Response = await fetch(next, { credentials: 'include' });
     if (!response.ok) throw new CanvasHttpError(response.status, response.statusText, label);
+    assertJson(response, label);
     const page: unknown = await response.json();
     if (!Array.isArray(page)) throw new Error(`Unexpected ${label} response format from Canvas`);
     all.push(...(page as T[]));

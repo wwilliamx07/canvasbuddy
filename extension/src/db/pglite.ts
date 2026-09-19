@@ -21,20 +21,36 @@ export async function q(tx?: Queryable): Promise<Queryable> {
 
 let dbInstance: PGlite | null = null;
 let dbInitPromise: Promise<PGlite> | null = null;
+let dbName: string | null = null;
 
-const LOCK_NAME = 'canvas-buddy-pglite';
+/**
+ * Each Canvas identity has its own database (see `canvas/identity.ts`); the name is set once at
+ * startup, before anything calls `getDB()`. Nothing else may name a data dir.
+ */
+export function configureDatabase(name: string): void {
+  if (dbInstance && dbName !== name) throw new Error('The memory is already open under another name; reload to switch.');
+  dbName = name;
+}
+
+/** Closes the open database (before deleting it); the next getDB() reopens it. */
+export async function closeDB(): Promise<void> {
+  const db = dbInstance;
+  dbInstance = null;
+  dbInitPromise = null;
+  if (db) await db.close();
+}
 
 /**
  * PGlite's IndexedDB filesystem is not safe to open from two pages at once, and Chrome opens one
  * side panel per window. Hold a Web Lock for the lifetime of this page; a second page gets a
  * clear error instead of silently corrupting the database.
  */
-async function acquireExclusiveLock(): Promise<void> {
+async function acquireExclusiveLock(name: string): Promise<void> {
   if (typeof navigator === 'undefined' || !navigator.locks) return;
 
   const acquired = await new Promise<boolean>((resolve) => {
     navigator.locks
-      .request(LOCK_NAME, { ifAvailable: true }, (lock) => {
+      .request(`canvas-buddy-pglite:${name}`, { ifAvailable: true }, (lock) => {
         if (!lock) {
           resolve(false);
           return Promise.resolve();
@@ -54,8 +70,8 @@ async function acquireExclusiveLock(): Promise<void> {
 }
 
 /**
- * Initializes and returns the persistent PGlite database singleton
- * backed by IndexedDB ('idb://canvas-buddy-db') with pgvector enabled.
+ * Initializes and returns the persistent PGlite database singleton for the configured identity,
+ * backed by IndexedDB ('idb://<dbName>') with pgvector enabled.
  */
 export async function getDB(): Promise<PGlite> {
   if (dbInstance) {
@@ -66,10 +82,13 @@ export async function getDB(): Promise<PGlite> {
     return dbInitPromise;
   }
 
+  const name = dbName;
+  if (!name) throw new Error('Memory is not open yet. Connect to Canvas first.');
+
   dbInitPromise = (async () => {
     try {
-      await acquireExclusiveLock();
-      const db = await PGlite.create('idb://canvas-buddy-db', {
+      await acquireExclusiveLock(name);
+      const db = await PGlite.create(`idb://${name}`, {
         extensions: {
           vector,
         },

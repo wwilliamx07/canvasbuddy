@@ -9,6 +9,9 @@ import { getGraphOverviewText } from './db/graph';
 import { buildSystemPrompt } from './agent/prompt';
 import { Connect } from './components/Connect/Connect';
 import { activateCanvas, hasOriginPermission, releaseOriginPermission } from './canvas/connection';
+import { resolveIdentity, memorySlotFor, forgetMemory, type MemorySlot } from './canvas/identity';
+import { onSessionLost } from './canvas/http';
+import { configureDatabase, closeDB } from './db/pglite';
 import { profileFor, type CanvasProfile } from './canvas/profiles';
 import { TOOL_CONFIG, toolFunctions, type ToolConfig } from './agent/tools';
 import './App.css';
@@ -66,8 +69,8 @@ interface Chat {
 
 type Connection =
   | { status: 'checking'; host?: string }
-  | { status: 'disconnected'; host?: string }
-  | { status: 'connected'; host: string; profile: CanvasProfile };
+  | { status: 'disconnected'; host?: string; reason?: string }
+  | { status: 'connected'; host: string; profile: CanvasProfile; memory: MemorySlot; live: boolean };
 
 /** Persisted tool results are capped; the model saw the full result within its own turn. */
 const PERSISTED_TOOL_RESULT_MAX = 1500;
@@ -541,7 +544,6 @@ function capToolResults(message: ConversationMessage): ConversationMessage {
 // Persistence
 // ---------------------------------------------------------------------------
 
-const CHATS_KEY = 'canvas-buddy-chats';
 const SETTINGS_KEY = 'canvas-buddy-settings';
 
 function reviveChat(chat: any): Chat {
@@ -604,6 +606,10 @@ function App() {
   const [settings, setSettings] = useState<AppSettings>(() => normalizeSettings(null));
   const [settingsLoaded, setSettingsLoaded] = useState(false);
   const [connection, setConnection] = useState<Connection>({ status: 'checking' });
+  const [notice, setNotice] = useState<string | null>(null);
+  const [connectNonce, setConnectNonce] = useState(0); // bumps on Connect so the same host re-resolves
+  // Chats live under the connected identity's key (canvas/identity.ts), known only once connected
+  const chatsKeyRef = useRef<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
 
   const loadChatIntoView = (chat: Chat | null) => {
@@ -613,19 +619,24 @@ function App() {
     setContextDigests(chat?.contextDigests ?? []);
   };
 
-  useEffect(() => {
-    const savedChats = localStorage.getItem(CHATS_KEY);
-    if (savedChats) {
-      try {
-        const parsed: Chat[] = JSON.parse(savedChats).map(reviveChat);
-        setChats(parsed);
-        if (parsed.length > 0) loadChatIntoView(parsed[parsed.length - 1]);
-        localStorage.setItem(CHATS_KEY, JSON.stringify(parsed));
-      } catch (error) {
-        console.error('Failed to load chats:', error);
-      }
+  const loadChats = (key: string) => {
+    chatsKeyRef.current = key;
+    let parsed: Chat[] = [];
+    try {
+      const saved = localStorage.getItem(key);
+      if (saved) parsed = JSON.parse(saved).map(reviveChat);
+    } catch (error) {
+      console.error('Failed to load chats:', error);
     }
+    setChats(parsed);
+    loadChatIntoView(parsed.length > 0 ? parsed[parsed.length - 1] : null);
+  };
 
+  const persistChats = (updated: Chat[]) => {
+    if (chatsKeyRef.current) localStorage.setItem(chatsKeyRef.current, JSON.stringify(updated));
+  };
+
+  useEffect(() => {
     const savedSettings = localStorage.getItem(SETTINGS_KEY);
     if (savedSettings) {
       try {
@@ -643,23 +654,76 @@ function App() {
     if (!settingsLoaded) return;
     const host = settings.canvasHost;
     if (!host) {
+      chatsKeyRef.current = null;
+      setChats([]);
+      loadChatIntoView(null);
       setConnection({ status: 'disconnected' });
       return;
     }
     let cancelled = false;
     setConnection({ status: 'checking', host });
-    hasOriginPermission(host).then((granted) => {
-      if (cancelled) return;
-      setConnection(granted ? { status: 'connected', host, profile: activateCanvas(host) } : { status: 'disconnected', host });
-    });
+    (async () => {
+      if (!(await hasOriginPermission(host))) return { status: 'disconnected', host } as Connection;
+      const profile = activateCanvas(host);
+      const resolved = await resolveIdentity(host);
+      if (!resolved) return { status: 'disconnected', host, reason: `Not signed in to ${host}. Sign in there, then connect again.` } as Connection;
+      const memory = memorySlotFor(resolved.identity);
+      configureDatabase(memory.dbName);
+      return { status: 'connected', host, profile, memory, live: resolved.live } as Connection;
+    })()
+      .then((next) => {
+        if (cancelled) return;
+        if (next.status === 'connected') {
+          loadChats(next.memory.chatsKey);
+          setNotice(next.live ? null : `Not signed in to ${host}; showing what's remembered for ${next.memory.name}.`);
+        }
+        setConnection(next);
+      })
+      .catch((e) => {
+        if (!cancelled) setConnection({ status: 'disconnected', host, reason: e instanceof Error ? e.message : String(e) });
+      });
     return () => {
       cancelled = true;
     };
-  }, [settingsLoaded, settings.canvasHost]);
+  }, [settingsLoaded, settings.canvasHost, connectNonce]);
+
+  // A sign-in page mid-session means the session ended or another account signed in. The
+  // database stays that of the identity it was opened for; a different account is never mixed in.
+  useEffect(() => {
+    if (connection.status !== 'connected') {
+      onSessionLost(null);
+      return;
+    }
+    const { host, memory } = connection;
+    let checking = false;
+    onSessionLost(() => {
+      if (checking) return;
+      checking = true;
+      resolveIdentity(host)
+        .then((resolved) => {
+          if (!resolved || !resolved.live) setNotice(`Not signed in to ${host}; showing what's remembered for ${memory.name}.`);
+          else if (resolved.identity.userId !== memory.userId) setNotice(`Signed in as ${resolved.identity.name}. Reload to switch memory.`);
+        })
+        .finally(() => {
+          checking = false;
+        });
+    });
+    return () => onSessionLost(null);
+  }, [connection]);
 
   const handleConnected = (host: string) => {
-    setConnection({ status: 'connected', host, profile: activateCanvas(host) });
+    // The effect above resolves the identity and opens its memory
     handleSettingsChange({ ...settings, canvasHost: host });
+    setConnectNonce((n) => n + 1);
+  };
+
+  const handleForgetMemory = async () => {
+    if (connection.status !== 'connected') return;
+    const { memory } = connection;
+    if (!window.confirm(`Forget everything remembered for ${memory.name} (${memory.host})? Courses, documents and chats for this account will be deleted.`)) return;
+    await closeDB();
+    await forgetMemory(memory);
+    window.location.reload();
   };
 
   const handleDisconnect = () => {
@@ -693,7 +757,7 @@ function App() {
             }
           : chat
       );
-      localStorage.setItem(CHATS_KEY, JSON.stringify(updated));
+      persistChats(updated);
       return updated;
     });
   };
@@ -711,7 +775,7 @@ function App() {
     };
     setChats((prevChats) => {
       const updated = [...prevChats, newChat];
-      localStorage.setItem(CHATS_KEY, JSON.stringify(updated));
+      persistChats(updated);
       return updated;
     });
     loadChatIntoView(newChat);
@@ -727,7 +791,7 @@ function App() {
   const deleteChat = (chatId: string) => {
     const updated = chats.filter((c) => c.id !== chatId);
     setChats(updated);
-    localStorage.setItem(CHATS_KEY, JSON.stringify(updated));
+    persistChats(updated);
     if (currentChatId === chatId) loadChatIntoView(updated.length > 0 ? updated[updated.length - 1] : null);
   };
 
@@ -1013,20 +1077,33 @@ function App() {
       />
 
       <main className="flex-1 flex flex-col overflow-hidden h-full">
+        {notice && (
+          <div className="flex items-center justify-between gap-3 px-4 py-2 bg-amber-50 border-b border-amber-200 text-xs text-amber-800 flex-shrink-0">
+            <span>{notice}</span>
+            <button onClick={() => window.location.reload()} className="font-medium underline whitespace-nowrap">
+              Reload
+            </button>
+          </div>
+        )}
         {activeTab === 'settings' ? (
           <Settings
             settings={settings}
             onSettingsChange={handleSettingsChange}
             currentContextTokens={currentContextTokens}
-            connection={connection.status === 'connected' ? { host: connection.host, profileName: connection.profile.name } : null}
+            connection={
+              connection.status === 'connected'
+                ? { host: connection.host, profileName: connection.profile.name, memoryName: connection.memory.name }
+                : null
+            }
             onDisconnect={handleDisconnect}
+            onForgetMemory={handleForgetMemory}
           />
         ) : connection.status === 'checking' ? (
           <div className="flex-1 flex items-center justify-center bg-gray-50 text-sm text-gray-500">
             {connection.host ? `Connecting to ${connection.host}…` : 'Loading…'}
           </div>
         ) : connection.status === 'disconnected' ? (
-          <Connect initialHost={connection.host} onConnected={handleConnected} />
+          <Connect initialHost={connection.host} initialError={connection.reason} onConnected={handleConnected} />
         ) : activeTab === 'chat' ? (
           <ChatUI
             messages={messages}
@@ -1035,7 +1112,7 @@ function App() {
             isLoading={isLoading}
           />
         ) : (
-          <GraphExplorer settings={settings} />
+          <GraphExplorer settings={settings} memoryLabel={`${connection.memory.name} · ${connection.host}`} />
         )}
       </main>
     </div>

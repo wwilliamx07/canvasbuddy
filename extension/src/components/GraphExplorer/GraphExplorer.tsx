@@ -70,9 +70,11 @@ function indexTargetFor(node: any, courseId: string | null): { docId: string; ta
 
 interface GraphExplorerProps {
   settings: AppSettings;
+  /** "<name> · <host>" of the identity whose memory this is. */
+  memoryLabel?: string;
 }
 
-export const GraphExplorer: React.FC<GraphExplorerProps> = ({ settings }) => {
+export const GraphExplorer: React.FC<GraphExplorerProps> = ({ settings, memoryLabel }) => {
   const [stats, setStats] = useState<GraphStats>({
     courseCount: 0,
     moduleCount: 0,
@@ -285,7 +287,7 @@ export const GraphExplorer: React.FC<GraphExplorerProps> = ({ settings }) => {
               </span>
             </h1>
             <p className="hidden md:block text-xs text-slate-400">
-              What CanvasBuddy remembers about your courses, kept current on demand
+              {memoryLabel ? `Memory for ${memoryLabel}, kept current on demand` : 'What CanvasBuddy remembers about your courses, kept current on demand'}
             </p>
           </div>
         </div>

@@ -42,11 +42,20 @@ interface SettingsProps {
   onSettingsChange: (settings: AppSettings) => void;
   currentContextTokens?: number;
   /** The Canvas this panel is connected to, or null when the Connect screen is showing. */
-  connection?: { host: string; profileName: string } | null;
+  connection?: { host: string; profileName: string; memoryName: string } | null;
   onDisconnect?: () => void;
+  /** Deletes this identity's database and chats (asks for confirmation) and reloads. */
+  onForgetMemory?: () => void;
 }
 
-export const Settings: React.FC<SettingsProps> = ({ settings, onSettingsChange, currentContextTokens = 0, connection = null, onDisconnect }) => {
+export const Settings: React.FC<SettingsProps> = ({
+  settings,
+  onSettingsChange,
+  currentContextTokens = 0,
+  connection = null,
+  onDisconnect,
+  onForgetMemory,
+}) => {
   const [showApiKey, setShowApiKey] = useState(false);
   const [form, setForm] = useState(settings);
   const [justSaved, setJustSaved] = useState(false);
@@ -113,25 +122,41 @@ export const Settings: React.FC<SettingsProps> = ({ settings, onSettingsChange, 
       <div className="max-w-2xl space-y-6">
         {/* Canvas connection */}
         <div className="bg-gray-100 rounded-lg p-3 flex items-center justify-between gap-3">
-          <div className="flex items-center gap-2 min-w-0 text-sm text-gray-700">
-            <Link2 size={16} className="flex-shrink-0 text-gray-500" />
+          <div className="flex items-start gap-2 min-w-0 text-sm text-gray-700">
+            <Link2 size={16} className="flex-shrink-0 text-gray-500 mt-0.5" />
             {connection ? (
-              <span className="truncate">
-                Connected to <span className="font-medium text-gray-900">{connection.host}</span>
-                {connection.profileName !== 'Canvas' && <span className="text-gray-500"> · {connection.profileName}</span>}
-              </span>
+              <div className="min-w-0">
+                <div className="truncate">
+                  Connected to <span className="font-medium text-gray-900">{connection.host}</span>
+                  {connection.profileName !== 'Canvas' && <span className="text-gray-500"> · {connection.profileName}</span>}
+                </div>
+                <div className="text-xs text-gray-500 truncate">Memory for {connection.memoryName}</div>
+              </div>
             ) : (
               <span className="text-gray-500">Not connected — open the Chat tab to connect to your Canvas</span>
             )}
           </div>
-          {connection && onDisconnect && (
-            <button
-              onClick={onDisconnect}
-              className="px-3 py-1.5 text-xs bg-gray-200 hover:bg-gray-300 text-gray-800 rounded-lg font-medium transition-colors whitespace-nowrap"
-              title="Forget this Canvas and release its permission"
-            >
-              Disconnect
-            </button>
+          {connection && (
+            <div className="flex flex-col sm:flex-row gap-1.5 flex-shrink-0">
+              {onForgetMemory && (
+                <button
+                  onClick={onForgetMemory}
+                  className="px-3 py-1.5 text-xs bg-gray-200 hover:bg-red-100 hover:text-red-800 text-gray-800 rounded-lg font-medium transition-colors whitespace-nowrap"
+                  title="Delete everything remembered for this account"
+                >
+                  Forget this memory
+                </button>
+              )}
+              {onDisconnect && (
+                <button
+                  onClick={onDisconnect}
+                  className="px-3 py-1.5 text-xs bg-gray-200 hover:bg-gray-300 text-gray-800 rounded-lg font-medium transition-colors whitespace-nowrap"
+                  title="Release this site's permission; memory is kept"
+                >
+                  Disconnect
+                </button>
+              )}
+            </div>
           )}
         </div>
 

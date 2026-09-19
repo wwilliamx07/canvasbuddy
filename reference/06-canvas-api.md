@@ -6,7 +6,7 @@ Sources: `src/canvas/http.ts` (`CANVAS_BASE`, `canvasGet`, `fetchAllPages`, `Can
 
 There is no Canvas API token. Every request is made from the extension page with `fetch(url, { credentials: 'include' })`, and the browser attaches the user's Canvas session cookies because the extension holds an origin permission for that host. The manifest grants **no host by default**: it declares `optional_host_permissions: ["https://*/*"]`, and the Connect screen (`components/Connect`, `canvas/connection.ts`) requests the profile's origins (`https://*.utoronto.ca/*` for Quercus, `https://<host>/*` otherwise) from a click, verifies the session with `GET /api/v1/users/self` (a login page is HTML with 200 — the content type is checked), and stores the host in `settings.canvasHost`. Consequences:
 
-- The user must be logged in to their Canvas in the same browser profile; otherwise Canvas returns a login redirect/HTML. Connect detects this; inside a sync it still surfaces as a JSON parse / "Unexpected … response format" error.
+- The user must be logged in to their Canvas in the same browser profile; otherwise Canvas returns a login page as HTML with status 200. `canvasGet` / `fetchAllPages` check the content type (`assertJson`), throw a "sign-in page instead of …" error, and fire the `onSessionLost` listener, which `App` uses to re-resolve the identity (signed out → banner; another account → "Reload to switch memory").
 - The host lives in `canvas/http.ts` module state (`configureCanvas(host)` at startup / Connect; `canvasHost()` / `canvasBase()` for readers) — nothing else may hardcode a host. Which hostnames count as *inside* the Canvas for link parsing is the profile's `isInternalHost`.
 - Chrome can revoke optional permissions, so `hasOriginPermission` runs on every start and the Connect screen returns when it is missing.
 - File downloads go through `/files/:id/public_url` to obtain a signed URL and fetch it plainly; if that host is outside the granted origins the browser refuses, and the file's own `url` on the Canvas host is fetched with credentials instead. A deployment whose downloads still fail needs its CDN origin added to its profile's `origins`.
@@ -52,7 +52,7 @@ Verified 2026-09-18 on a course whose Home is a front page (`default_view: wiki`
 
 - Every Canvas request goes through `canvasGet` / `fetchAllPages`, which throw `CanvasHttpError` (with `.status`) on non-OK. The freshness engine treats 403/404 as "this course hides this collection" and marks the scope unavailable.
 - Responses are shaped in `canvas/collections.ts` before storage (`Shaped*` types in `types/canvas.ts`); the model never sees a raw Canvas object.
-- A login redirect (HTML with status 200) surfaces as a JSON parse error / "Unexpected … response format"; it is not yet detected specifically.
+- A login redirect (HTML with status 200) is detected by content type in `canvas/http.ts` and reported as a sign-in problem, not a parse error.
 
 ## Entity types (`types/canvas.ts`)
 

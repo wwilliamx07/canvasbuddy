@@ -6,6 +6,8 @@ import { normalizeHost, profileFor } from '../../canvas/profiles';
 interface ConnectProps {
   /** Host to prefill (a previous connection whose permission is gone), if any. */
   initialHost?: string;
+  /** Why the previous connection did not come back (e.g. signed out). */
+  initialError?: string;
   onConnected: (host: string) => void;
 }
 
@@ -14,10 +16,10 @@ interface ConnectProps {
  * user gesture, so the whole flow hangs off the Connect button: request → verify the session
  * reaches Canvas → hand the host up.
  */
-export const Connect: React.FC<ConnectProps> = ({ initialHost, onConnected }) => {
+export const Connect: React.FC<ConnectProps> = ({ initialHost, initialError, onConnected }) => {
   const [hostInput, setHostInput] = useState(initialHost || '');
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(initialError || null);
 
   // Prefill from the tab the panel was opened on
   useEffect(() => {
