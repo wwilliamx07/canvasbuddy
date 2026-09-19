@@ -1,4 +1,22 @@
-export const CANVAS_BASE = 'https://q.utoronto.ca/api/v1';
+/**
+ * The Canvas deployment this session talks to. Set once at startup / Connect from
+ * `settings.canvasHost` after the origin permission is confirmed; nothing else may hardcode a host.
+ */
+let configuredHost: string | null = null;
+
+export function configureCanvas(host: string): void {
+  configuredHost = host;
+}
+
+/** The connected Canvas host ("q.utoronto.ca"), or throws when the panel is not connected yet. */
+export function canvasHost(): string {
+  if (!configuredHost) throw new Error('Not connected to Canvas. Connect from the Chat tab first.');
+  return configuredHost;
+}
+
+export function canvasBase(): string {
+  return `https://${canvasHost()}/api/v1`;
+}
 
 /**
  * Canvas returned a non-2xx status. `status` lets callers distinguish "this course hides
@@ -19,7 +37,7 @@ export function isUnavailableError(e: unknown): boolean {
 
 /** GET with the browser's Canvas session; throws CanvasHttpError on non-OK. */
 export async function canvasGet<T = unknown>(path: string, label: string): Promise<T> {
-  const url = path.startsWith('http') ? path : `${CANVAS_BASE}${path}`;
+  const url = path.startsWith('http') ? path : `${canvasBase()}${path}`;
   const response = await fetch(url, { credentials: 'include' });
   if (!response.ok) throw new CanvasHttpError(response.status, response.statusText, label);
   return (await response.json()) as T;
@@ -34,7 +52,7 @@ export async function canvasGet<T = unknown>(path: string, label: string): Promi
  */
 export async function fetchAllPages<T>(path: string, label: string, maxPages = 100): Promise<T[]> {
   const all: T[] = [];
-  let next: string | null = path.startsWith('http') ? path : `${CANVAS_BASE}${path}`;
+  let next: string | null = path.startsWith('http') ? path : `${canvasBase()}${path}`;
   let guard = 0;
 
   while (next && guard++ < maxPages) {

@@ -1,10 +1,13 @@
 /**
- * System prompt. Freshness is not the model's concern: every tool reads a local copy of Canvas
- * that the extension keeps current on demand, so the prompt is about *what* to ask for, not
- * *where* to get it. The course roster is attached to the latest user turn, not here, so the
- * prompt + tool schemas stay a stable, cacheable prefix.
+ * System prompt. The first sentence comes from the deployment profile (`canvas/profiles.ts`) so
+ * the student's Canvas is named the way they know it; it is fixed for a session, so the prompt +
+ * tool schemas stay a stable, cacheable prefix. Freshness is not the model's concern: every tool
+ * reads a local copy of Canvas that the extension keeps current on demand, so the prompt is about
+ * *what* to ask for, not *where* to get it. The course roster is attached to the latest user turn,
+ * not here.
  */
-export const SYSTEM_PROMPT = `You are a helpful student assistant integrated into Canvas (Quercus at the University of Toronto). You help students manage their courses, assignments, and academic tasks.
+export function buildSystemPrompt(intro: string): string {
+  return `${intro} You help students manage their courses, assignments, and academic tasks.
 
 Your tools read the student's Canvas data. The data is kept current automatically; never worry about caching or staleness. Only set refresh=true when the user says something changed or explicitly asks you to re-check Canvas.
 
@@ -23,3 +26,4 @@ DOCUMENTS
 STYLE
 8. Be concise and organized. Lead with the answer. Results may include "notes" (e.g. a collection is hidden in a course, or a refresh failed); mention them only when they affect the answer.
 9. Math: LaTeX with $…$ inline and $$…$$ on its own line for display; escape #, %, & inside \\text{}; never put math in code spans.`;
+}

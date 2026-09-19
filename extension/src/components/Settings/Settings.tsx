@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Eye, EyeOff } from 'lucide-react';
+import { Eye, EyeOff, Link2 } from 'lucide-react';
 import { DEFAULT_FRESHNESS, type FreshnessSettings } from '../../canvas/freshness';
 import { DEFAULT_BASE_URLS } from '../../settings';
 
@@ -12,6 +12,8 @@ export interface AppSettings {
   contextThreshold: number;
   /** Per-collection max ages in minutes; missing keys fall back to DEFAULT_FRESHNESS. */
   freshness?: Partial<FreshnessSettings>;
+  /** The connected Canvas host ("q.utoronto.ca"); empty until the Connect screen succeeds. */
+  canvasHost?: string;
 }
 
 const FRESHNESS_FIELDS: Array<{ key: keyof FreshnessSettings; label: string; hint: string }> = [
@@ -39,9 +41,12 @@ interface SettingsProps {
   settings: AppSettings;
   onSettingsChange: (settings: AppSettings) => void;
   currentContextTokens?: number;
+  /** The Canvas this panel is connected to, or null when the Connect screen is showing. */
+  connection?: { host: string; profileName: string } | null;
+  onDisconnect?: () => void;
 }
 
-export const Settings: React.FC<SettingsProps> = ({ settings, onSettingsChange, currentContextTokens = 0 }) => {
+export const Settings: React.FC<SettingsProps> = ({ settings, onSettingsChange, currentContextTokens = 0, connection = null, onDisconnect }) => {
   const [showApiKey, setShowApiKey] = useState(false);
   const [form, setForm] = useState(settings);
   const [justSaved, setJustSaved] = useState(false);
@@ -106,6 +111,30 @@ export const Settings: React.FC<SettingsProps> = ({ settings, onSettingsChange, 
       </div>
 
       <div className="max-w-2xl space-y-6">
+        {/* Canvas connection */}
+        <div className="bg-gray-100 rounded-lg p-3 flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2 min-w-0 text-sm text-gray-700">
+            <Link2 size={16} className="flex-shrink-0 text-gray-500" />
+            {connection ? (
+              <span className="truncate">
+                Connected to <span className="font-medium text-gray-900">{connection.host}</span>
+                {connection.profileName !== 'Canvas' && <span className="text-gray-500"> · {connection.profileName}</span>}
+              </span>
+            ) : (
+              <span className="text-gray-500">Not connected — open the Chat tab to connect to your Canvas</span>
+            )}
+          </div>
+          {connection && onDisconnect && (
+            <button
+              onClick={onDisconnect}
+              className="px-3 py-1.5 text-xs bg-gray-200 hover:bg-gray-300 text-gray-800 rounded-lg font-medium transition-colors whitespace-nowrap"
+              title="Forget this Canvas and release its permission"
+            >
+              Disconnect
+            </button>
+          )}
+        </div>
+
         {/* LLM Provider */}
         <div>
           <label className="block text-sm font-semibold text-gray-800 mb-2">

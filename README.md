@@ -1,6 +1,6 @@
 # CanvasBuddy
 
-CanvasBuddy is a personal AI agent for the University of Toronto's Quercus (Canvas). It runs entirely in a browser side panel — no backend — and answers questions about your courses, deadlines, documents, announcements and inbox using your own LLM API key.
+CanvasBuddy is a personal AI agent for Canvas LMS — built on the University of Toronto's Quercus, and connectable to any Canvas site. It runs entirely in a browser side panel — no backend — and answers questions about your courses, deadlines, documents, announcements and inbox using your own LLM API key.
 
 ## What it can do
 
@@ -28,7 +28,7 @@ Canvas often hides a course's Files and Pages areas from students while everythi
 Documents are indexed just in time: the first question about a file downloads it, extracts text per page/slide (small slides are grouped so each chunk has enough context, and every chunk remembers the page range it covers), embeds it (768-d) and stores chunks with a full-text index and an HNSW vector index; later questions hit the local index. When a document changes upstream, only the pages whose text actually changed are re-embedded. Inbox threads are stored as text when the inbox syncs (keyword-searchable for free) and embedded only when a semantic search targets that thread.
 
 **Architecture**
-- Manifest V3 extension for Chrome/Edge, opened as a side panel; Canvas is reached with your existing login session (no Canvas token)
+- Manifest V3 extension for Chrome/Edge, opened as a side panel; Canvas is reached with your existing login session (no Canvas token) — the site's permission is requested when you connect, not at install
 - React 19 + TypeScript + Tailwind
 - Gemini or OpenAI (and OpenAI-compatible endpoints) for chat and embeddings, with real function-call turns on both; replies stream token by token, with a line per tool call the assistant made and a Stop button
 - Chats and settings in localStorage; graph and vectors in PGlite/IndexedDB
@@ -46,6 +46,6 @@ npm install
 npm run build
 ```
 
-Then load `extension/dist` as an unpacked extension (chrome://extensions → Developer mode → Load unpacked), open a Quercus tab so you are logged in, and click the toolbar icon to open the side panel. Enter your Gemini or OpenAI key in **Settings**.
+Then load `extension/dist` as an unpacked extension (chrome://extensions → Developer mode → Load unpacked), open your Canvas site in a tab and sign in, click the toolbar icon to open the side panel, and press **Connect** (the host is prefilled from the tab; Chrome asks once for permission to that site). Enter your Gemini or OpenAI key in **Settings**.
 
 Type-check with `npx tsc -p tsconfig.app.json --noEmit` from `extension/`.

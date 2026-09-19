@@ -1,5 +1,7 @@
 import type { ContentLink } from '../types/canvas';
 import { htmlToText } from './textExtractor';
+import { canvasHost } from '../canvas/http';
+import { profileFor } from '../canvas/profiles';
 
 /**
  * Canvas content is a graph of HTML bodies linking to files, pages, assignments and external
@@ -9,8 +11,6 @@ import { htmlToText } from './textExtractor';
  * can act on: "Syllabus [file 44541003]", "Week 1 [page week-1]", "Zoom <https://…>".
  */
 
-const CANVAS_HOST = /(^|\.)utoronto\.ca$/;
-
 export type ParsedRef = Pick<ContentLink, 'to_type' | 'to_ref' | 'course_id'>;
 
 /** Classifies one href (or Canvas's data-api-endpoint) into a graph reference. Returns null for anchors/mailto/js. */
@@ -19,15 +19,17 @@ export function parseCanvasHref(href: string, currentCourseId?: string | null): 
   const trimmed = href.trim();
   if (/^(#|mailto:|javascript:|tel:)/i.test(trimmed)) return null;
 
+  // Relative hrefs are relative to the connected Canvas; which hosts count as "inside" it is the profile's call
+  const host = canvasHost();
   let url: URL;
   try {
-    url = new URL(trimmed, 'https://q.utoronto.ca/');
+    url = new URL(trimmed, `https://${host}/`);
   } catch {
     return null;
   }
   if (!/^https?:$/.test(url.protocol)) return null;
 
-  const internal = CANVAS_HOST.test(url.hostname);
+  const internal = profileFor(host).isInternalHost(url.hostname, host);
   if (!internal) return { to_type: 'external', to_ref: url.href, course_id: null };
 
   const path = url.pathname.replace(/^\/api\/v1/, '');

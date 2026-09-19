@@ -195,21 +195,31 @@ async function loadDocumentSource(target: IndexTarget): Promise<DocumentSource> 
       version: meta.modified_at || meta.updated_at || String(meta.size || '1'),
       htmlUrl: meta.url || null,
       loadPages: async () => {
-        let downloadUrl: string | undefined = meta.url;
+        // `public_url` is a signed link that may live on a file CDN outside the origins the
+        // extension was granted; if the browser refuses it, the file's own `url` on the Canvas
+        // host (session-authenticated) is tried next.
+        const candidates: Array<{ url: string; init?: RequestInit }> = [];
         try {
           const urlData = await canvasGet<{ public_url?: string }>(`/files/${sourceId}/public_url`, `download URL for file ${sourceId}`);
-          if (urlData.public_url) downloadUrl = urlData.public_url;
+          if (urlData.public_url) candidates.push({ url: urlData.public_url });
         } catch {
-          // fall back to the metadata url
+          // fall through to the metadata url
         }
-        if (!downloadUrl) {
+        if (meta.url) candidates.push({ url: meta.url, init: { credentials: 'include' } });
+        if (candidates.length === 0) {
           throw new Error(`Unable to obtain download URL for file ${sourceId}`);
         }
-        const fileDownload = await fetch(downloadUrl);
-        if (!fileDownload.ok) {
-          throw new Error(`Failed to download ${filename} (${fileDownload.status})`);
+        let lastFailure = '';
+        for (const candidate of candidates) {
+          try {
+            const fileDownload = await fetch(candidate.url, candidate.init);
+            if (fileDownload.ok) return extractStructuredFromFile(await fileDownload.arrayBuffer(), filename);
+            lastFailure = String(fileDownload.status);
+          } catch (e) {
+            lastFailure = e instanceof Error ? e.message : 'network error';
+          }
         }
-        return extractStructuredFromFile(await fileDownload.arrayBuffer(), filename);
+        throw new Error(`Failed to download ${filename} (${lastFailure})`);
       },
     };
   }

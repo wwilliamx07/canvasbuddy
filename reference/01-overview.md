@@ -7,7 +7,7 @@ An AI study assistant for Canvas LMS, packaged as a Chrome/Edge extension that o
 Design constraints that shape everything:
 
 1. **No backend.** All compute, storage, and API calls happen in the extension page. The user brings their own LLM API key.
-2. **Canvas access rides on the browser session.** No Canvas API token is stored; requests go out with `credentials: 'include'` and succeed because the user is logged into Quercus in the same browser profile.
+2. **Canvas access rides on the browser session.** No Canvas API token is stored; requests go out with `credentials: 'include'` and succeed because the user is logged into their Canvas in the same browser profile. The Canvas host is chosen at first run (Connect screen) and its origin permission requested then; a deployment profile (`canvas/profiles.ts`, Quercus or generic) names it in the prompt.
 3. **Token economy matters.** Canvas payloads are large and the user pays per token, so the system caches structure locally and instructs the model to read the cache before going live.
 
 ## Runtime environment
@@ -16,7 +16,7 @@ Design constraints that shape everything:
 |---|---|---|
 | Extension format | Manifest V3 | `extension/manifest.json` |
 | Surface | Side panel (`side_panel.default_path = index.html`) | One panel per browser window. The service worker (`src/background.ts`) does nothing except `setPanelBehavior({ openPanelOnActionClick: true })`. |
-| Permissions | `sidePanel`; host `https://*.utoronto.ca/*` | Persistence uses localStorage and IndexedDB, so no `storage` permission is needed. |
+| Permissions | `sidePanel`, `activeTab`; `optional_host_permissions: https://*/*` — no fixed host | The Canvas origin is requested at runtime from the Connect screen (`chrome.permissions.request`, a user gesture) and re-checked on every start. `activeTab` lets the panel prefill the host from the tab the icon was clicked on. Persistence uses localStorage and IndexedDB, so no `storage` permission is needed. |
 | CSP | `script-src 'self' 'wasm-unsafe-eval'` | Required for PGlite's WASM. Inline scripts are blocked. |
 | UI | React 19, TypeScript, Tailwind v4 (`@tailwindcss/postcss`), `lucide-react` icons, `marked` for Markdown, `katex` for math | |
 | Database | `@electric-sql/pglite` + `@electric-sql/pglite-pgvector`, persisted at `idb://canvas-buddy-db` | Postgres compiled to WASM. See `04-knowledge-graph.md`. |
@@ -45,11 +45,14 @@ canvasbuddy/
         ├── components/
         │   ├── ChatUI/        ← message list + input
         │   ├── Navigation/    ← left rail: tabs + chat list
-        │   ├── Settings/      ← provider/key/model/threshold form; exports AppSettings
+        │   ├── Settings/      ← provider/key/model/threshold form; exports AppSettings; connected-Canvas row
+        │   ├── Connect/       ← first-run screen: host field → permission request → session check
         │   └── GraphExplorer/ ← knowledge-graph browser, sync + index buttons
-        ├── settings.ts        ← DEFAULT_SETTINGS + normalizeSettings (merges old persisted settings)
+        ├── settings.ts        ← DEFAULT_SETTINGS + normalizeSettings (merges old persisted settings), resolveBaseUrl
         ├── canvas/
-        │   ├── http.ts        ← CANVAS_BASE, canvasGet, fetchAllPages, CanvasHttpError
+        │   ├── http.ts        ← configureCanvas/canvasHost/canvasBase, canvasGet, fetchAllPages, CanvasHttpError
+        │   ├── profiles.ts    ← deployment profiles (quercus, generic): name, internal hosts, origins, prompt intro
+        │   ├── connection.ts  ← origin permission check/request, session verification, activeTab host
         │   ├── freshness.ts   ← ensureCurrent: TTL / probe / debounce / unavailable policy, sync_state
         │   ├── collections.ts ← registry: fetch + probe + shape + upsert for all 10 collections
         │   ├── links.ts       ← ingestHtml: HTML body → text with link markers + content_links rows
@@ -94,7 +97,7 @@ Two clients share the same data layer: the **agent** (via tools) and the **Graph
 | Data | Where | Format |
 |---|---|---|
 | Chats (display messages, model-facing history with capped tool turns, context digests) | `localStorage['canvas-buddy-chats']` | JSON array of `Chat` |
-| Settings (provider, key, model, embedding model, threshold, freshness TTLs) | `localStorage['canvas-buddy-settings']` | JSON `AppSettings` |
+| Settings (provider, key, model, embedding model, threshold, freshness TTLs, `canvasHost`) | `localStorage['canvas-buddy-settings']` | JSON `AppSettings` |
 | Knowledge graph + vectors | IndexedDB via PGlite (`idb://canvas-buddy-db`) | Postgres tables, see `04-knowledge-graph.md` |
 
 The API key is stored in plain localStorage; the settings page states it "never leaves the browser", which is true — it is only sent to the chosen LLM provider.

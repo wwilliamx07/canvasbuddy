@@ -4,11 +4,12 @@ Sources: `src/canvas/http.ts` (`CANVAS_BASE`, `canvasGet`, `fetchAllPages`, `Can
 
 ## Authentication model
 
-There is no Canvas API token. Every request is made from the extension page with `fetch(url, { credentials: 'include' })`, and the browser attaches the user's Quercus session cookies because `manifest.json` grants `host_permissions` for `https://*.utoronto.ca/*`. Consequences:
+There is no Canvas API token. Every request is made from the extension page with `fetch(url, { credentials: 'include' })`, and the browser attaches the user's Canvas session cookies because the extension holds an origin permission for that host. The manifest grants **no host by default**: it declares `optional_host_permissions: ["https://*/*"]`, and the Connect screen (`components/Connect`, `canvas/connection.ts`) requests the profile's origins (`https://*.utoronto.ca/*` for Quercus, `https://<host>/*` otherwise) from a click, verifies the session with `GET /api/v1/users/self` (a login page is HTML with 200 — the content type is checked), and stores the host in `settings.canvasHost`. Consequences:
 
-- The user must be logged in to Quercus in the same browser profile; otherwise Canvas returns a login redirect/HTML, which the code does not currently detect (`response.json()` fails or a non-array is returned).
-- The base URL `https://q.utoronto.ca/api/v1` is `CANVAS_BASE` in `canvas/http.ts` — the only place it appears. Supporting another institution means changing it and the manifest host permission.
-- File downloads go through `/files/:id/public_url` to obtain a signed URL, then a plain `fetch` (no credentials) to that URL.
+- The user must be logged in to their Canvas in the same browser profile; otherwise Canvas returns a login redirect/HTML. Connect detects this; inside a sync it still surfaces as a JSON parse / "Unexpected … response format" error.
+- The host lives in `canvas/http.ts` module state (`configureCanvas(host)` at startup / Connect; `canvasHost()` / `canvasBase()` for readers) — nothing else may hardcode a host. Which hostnames count as *inside* the Canvas for link parsing is the profile's `isInternalHost`.
+- Chrome can revoke optional permissions, so `hasOriginPermission` runs on every start and the Connect screen returns when it is missing.
+- File downloads go through `/files/:id/public_url` to obtain a signed URL and fetch it plainly; if that host is outside the granted origins the browser refuses, and the file's own `url` on the Canvas host is fetched with credentials instead. A deployment whose downloads still fail needs its CDN origin added to its profile's `origins`.
 
 ## Pagination
 

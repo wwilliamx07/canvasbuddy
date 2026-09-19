@@ -6,7 +6,10 @@ import { Settings, type AppSettings } from './components/Settings/Settings';
 import { normalizeSettings, resolveBaseUrl } from './settings';
 import { GraphExplorer } from './components/GraphExplorer/GraphExplorer';
 import { getGraphOverviewText } from './db/graph';
-import { SYSTEM_PROMPT } from './agent/prompt';
+import { buildSystemPrompt } from './agent/prompt';
+import { Connect } from './components/Connect/Connect';
+import { activateCanvas, hasOriginPermission, releaseOriginPermission } from './canvas/connection';
+import { profileFor, type CanvasProfile } from './canvas/profiles';
 import { TOOL_CONFIG, toolFunctions, type ToolConfig } from './agent/tools';
 import './App.css';
 
@@ -60,6 +63,11 @@ interface Chat {
   createdAt: Date;
   updatedAt: Date;
 }
+
+type Connection =
+  | { status: 'checking'; host?: string }
+  | { status: 'disconnected'; host?: string }
+  | { status: 'connected'; host: string; profile: CanvasProfile };
 
 /** Persisted tool results are capped; the model saw the full result within its own turn. */
 const PERSISTED_TOOL_RESULT_MAX = 1500;
@@ -430,6 +438,7 @@ function getConversationCoverageIndex(digests: ContextDigest[]): number {
 function buildApiHistory(
   apiHistory: ConversationMessage[],
   digests: ContextDigest[],
+  systemPrompt: string,
   courseOverview: string | null = null
 ): ConversationMessage[] {
   const orderedDigests = [...digests].sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
@@ -446,7 +455,7 @@ function buildApiHistory(
   }
 
   return [
-    { role: 'system', content: SYSTEM_PROMPT },
+    { role: 'system', content: systemPrompt },
     ...orderedDigests.map(digestToConversationMessage),
     ...remaining,
   ];
@@ -593,6 +602,8 @@ function App() {
   const [isLoading, setIsLoading] = useState(false);
   const [currentContextTokens, setCurrentContextTokens] = useState(0);
   const [settings, setSettings] = useState<AppSettings>(() => normalizeSettings(null));
+  const [settingsLoaded, setSettingsLoaded] = useState(false);
+  const [connection, setConnection] = useState<Connection>({ status: 'checking' });
   const abortRef = useRef<AbortController | null>(null);
 
   const loadChatIntoView = (chat: Chat | null) => {
@@ -623,7 +634,43 @@ function App() {
         console.error('Failed to load settings:', error);
       }
     }
+    setSettingsLoaded(true);
   }, []);
+
+  // The origin permission is optional and Chrome can revoke it, so a remembered host is
+  // re-checked on every start; the Connect screen comes back whenever it is missing.
+  useEffect(() => {
+    if (!settingsLoaded) return;
+    const host = settings.canvasHost;
+    if (!host) {
+      setConnection({ status: 'disconnected' });
+      return;
+    }
+    let cancelled = false;
+    setConnection({ status: 'checking', host });
+    hasOriginPermission(host).then((granted) => {
+      if (cancelled) return;
+      setConnection(granted ? { status: 'connected', host, profile: activateCanvas(host) } : { status: 'disconnected', host });
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [settingsLoaded, settings.canvasHost]);
+
+  const handleConnected = (host: string) => {
+    setConnection({ status: 'connected', host, profile: activateCanvas(host) });
+    handleSettingsChange({ ...settings, canvasHost: host });
+  };
+
+  const handleDisconnect = () => {
+    if (connection.status === 'connected') void releaseOriginPermission(connection.host);
+    handleSettingsChange({ ...settings, canvasHost: '' });
+  };
+
+  // Fixed for the session, so the prompt + tool schemas stay a cacheable prefix
+  const systemPrompt = buildSystemPrompt(
+    connection.status === 'connected' ? connection.profile.promptIntro(connection.host) : profileFor('').promptIntro('')
+  );
 
   const saveCurrentChat = (
     chatId: string,
@@ -694,8 +741,8 @@ function App() {
       setCurrentContextTokens(0);
       return;
     }
-    setCurrentContextTokens(estimateConversationTokens(buildApiHistory(apiHistory, contextDigests)));
-  }, [apiHistory, contextDigests, currentChatId, settings.contextThreshold]);
+    setCurrentContextTokens(estimateConversationTokens(buildApiHistory(apiHistory, contextDigests, systemPrompt)));
+  }, [apiHistory, contextDigests, currentChatId, settings.contextThreshold, systemPrompt]);
 
   const callLLM: CallLLM = async (history, settings, options = {}) => {
     const { includeTools = true, onDelta, signal } = options;
@@ -762,7 +809,7 @@ function App() {
     digests: ContextDigest[]
   ): Promise<ContextDigest[]> => {
     let nextDigests = [...digests];
-    let estimatedTokens = estimateConversationTokens(buildApiHistory(history, nextDigests));
+    let estimatedTokens = estimateConversationTokens(buildApiHistory(history, nextDigests, systemPrompt));
 
     while (estimatedTokens > settings.contextThreshold) {
       const coveredUpToIndex = getConversationCoverageIndex(nextDigests);
@@ -786,7 +833,7 @@ function App() {
           coversUpToIndex: coveredUpToIndex + toDigest.length,
         },
       ];
-      estimatedTokens = estimateConversationTokens(buildApiHistory(history, nextDigests));
+      estimatedTokens = estimateConversationTokens(buildApiHistory(history, nextDigests, systemPrompt));
     }
 
     return nextDigests;
@@ -850,7 +897,7 @@ function App() {
         currentMessages = [...currentMessages, { id: bubbleId, role: 'assistant', content: '', timestamp: new Date(), streaming: true }];
         setMessages(currentMessages);
 
-        const result = await callLLM(buildApiHistory(currentHistory, currentDigests, courseOverview), settings, {
+        const result = await callLLM(buildApiHistory(currentHistory, currentDigests, systemPrompt, courseOverview), settings, {
           signal,
           onDelta: (text) => {
             partialText += text;
@@ -966,21 +1013,29 @@ function App() {
       />
 
       <main className="flex-1 flex flex-col overflow-hidden h-full">
-        {activeTab === 'chat' && (
+        {activeTab === 'settings' ? (
+          <Settings
+            settings={settings}
+            onSettingsChange={handleSettingsChange}
+            currentContextTokens={currentContextTokens}
+            connection={connection.status === 'connected' ? { host: connection.host, profileName: connection.profile.name } : null}
+            onDisconnect={handleDisconnect}
+          />
+        ) : connection.status === 'checking' ? (
+          <div className="flex-1 flex items-center justify-center bg-gray-50 text-sm text-gray-500">
+            {connection.host ? `Connecting to ${connection.host}…` : 'Loading…'}
+          </div>
+        ) : connection.status === 'disconnected' ? (
+          <Connect initialHost={connection.host} onConnected={handleConnected} />
+        ) : activeTab === 'chat' ? (
           <ChatUI
             messages={messages}
             onSendMessage={handleSendMessage}
             onStop={handleStop}
             isLoading={isLoading}
           />
-        )}
-        {activeTab === 'graph' && <GraphExplorer settings={settings} />}
-        {activeTab === 'settings' && (
-          <Settings
-            settings={settings}
-            onSettingsChange={handleSettingsChange}
-            currentContextTokens={currentContextTokens}
-          />
+        ) : (
+          <GraphExplorer settings={settings} />
         )}
       </main>
     </div>
