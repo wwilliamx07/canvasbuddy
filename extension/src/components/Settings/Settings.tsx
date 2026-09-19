@@ -43,16 +43,31 @@ interface SettingsProps {
 export const Settings: React.FC<SettingsProps> = ({ settings, onSettingsChange, currentContextTokens = 0 }) => {
   const [showApiKey, setShowApiKey] = useState(false);
   const [form, setForm] = useState(settings);
+  const [justSaved, setJustSaved] = useState(false);
+  const savedTimeoutRef = React.useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
   React.useEffect(() => {
     setForm(settings);
   }, [settings]);
+
+  // Clear any pending "Saved" pill timeout on unmount so it doesn't fire after the component is gone.
+  React.useEffect(() => {
+    return () => {
+      if (savedTimeoutRef.current) clearTimeout(savedTimeoutRef.current);
+    };
+  }, []);
 
   const handleChange = (field: keyof AppSettings, value: AppSettings[keyof AppSettings]) => {
     const updated = { ...form, [field]: value };
     setForm(updated);
     // Auto-save immediately on any change to persist settings
     onSettingsChange(updated);
+
+    // Show a transient "Saved" pill; a ref (not state) holds the timeout so rapid keystrokes
+    // reset it instead of stacking up timers.
+    setJustSaved(true);
+    if (savedTimeoutRef.current) clearTimeout(savedTimeoutRef.current);
+    savedTimeoutRef.current = setTimeout(() => setJustSaved(false), 1500);
   };
 
   const freshness: FreshnessSettings = { ...DEFAULT_FRESHNESS, ...(form.freshness || {}) };
@@ -62,14 +77,32 @@ export const Settings: React.FC<SettingsProps> = ({ settings, onSettingsChange, 
     handleChange('freshness', { ...freshness, [key]: Math.floor(parsed) });
   };
 
-
-  const handleReset = () => {
-    setForm(settings);
-  };
+  // Loose format hint only — never blocks saving or clears the value. A custom base URL means an
+  // OpenAI-compatible provider whose keys look different, so the hint stays quiet there.
+  const apiKeyFormatHint = (() => {
+    if (!form.apiKey) return null;
+    if (form.llmProvider === 'google' && !form.apiKey.startsWith('AIza')) {
+      return "This doesn't look like a Google AI key (they start with AIza…)";
+    }
+    if (form.llmProvider === 'openai' && !form.baseUrl.trim() && !form.apiKey.startsWith('sk-')) {
+      return "This doesn't look like an OpenAI key (they start with sk-…)";
+    }
+    return null;
+  })();
 
   return (
     <div className="flex-1 flex flex-col h-full bg-gray-50 p-6 overflow-y-auto min-h-0">
-      <h1 className="text-3xl font-bold text-gray-900 mb-6">Settings</h1>
+      <div className="flex items-center gap-3 mb-6">
+        <div>
+          <h1 className="text-3xl font-bold text-gray-900">Settings</h1>
+          <p className="text-xs text-gray-500 mt-1">Changes save automatically</p>
+        </div>
+        {justSaved && (
+          <span className="animate-fade-in text-xs font-medium text-green-700 bg-green-100 px-2 py-1 rounded-full">
+            Saved
+          </span>
+        )}
+      </div>
 
       <div className="max-w-2xl space-y-6">
         {/* LLM Provider */}
@@ -114,6 +147,9 @@ export const Settings: React.FC<SettingsProps> = ({ settings, onSettingsChange, 
           <p className="text-xs text-gray-500 mt-1">
             Your API key is stored locally and never shared
           </p>
+          {apiKeyFormatHint && (
+            <p className="text-xs text-amber-600 mt-1">{apiKeyFormatHint}</p>
+          )}
         </div>
 
         {/* Base URL */}
@@ -143,7 +179,7 @@ export const Settings: React.FC<SettingsProps> = ({ settings, onSettingsChange, 
             value={form.model}
             onChange={(e) => handleChange('model', e.target.value)}
             className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-200"
-            placeholder="gpt-4o-mini"
+            placeholder={form.llmProvider === 'google' ? 'gemini-3.5-flash-lite' : 'gpt-4o-mini'}
           />
           <p className="text-xs text-gray-500 mt-1">
             The model to use for AI responses
@@ -254,16 +290,6 @@ export const Settings: React.FC<SettingsProps> = ({ settings, onSettingsChange, 
               </div>
             ))}
           </div>
-        </div>
-
-        {/* Action Buttons */}
-        <div className="flex gap-3 pt-4">
-          <button
-            onClick={handleReset}
-            className="px-6 py-2 bg-gray-300 hover:bg-gray-400 text-gray-800 rounded-lg font-medium transition-colors"
-          >
-            Cancel
-          </button>
         </div>
       </div>
     </div>

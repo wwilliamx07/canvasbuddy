@@ -64,6 +64,7 @@ export interface CanvasModuleItem {
   type: 'File' | 'Assignment' | 'Page' | 'Discussion' | 'Quiz' | 'SubHeader' | 'ExternalUrl' | 'ExternalTool' | string;
   content_id?: number | string;
   page_url?: string;        // wiki pages are addressed by slug, not content_id
+  external_url?: string;    // destination of ExternalUrl / ExternalTool items
   html_url?: string;
   url?: string;
   content_ref?: string;

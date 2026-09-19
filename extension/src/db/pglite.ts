@@ -48,7 +48,7 @@ async function acquireExclusiveLock(): Promise<void> {
 
   if (!acquired) {
     throw new Error(
-      'CanvasBuddy is already open in another browser window. Close it there to use the knowledge graph here.'
+      'CanvasBuddy is already open in another browser window. Close it there to use it here.'
     );
   }
 }

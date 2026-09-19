@@ -10,7 +10,7 @@ CanvasBuddy is a personal AI agent for the University of Toronto's Quercus (Canv
 - Read specific pages/slides of a document, or a whole message thread, verbatim
 - Show recent announcements and inbox conversations
 - Keep multiple chat threads locally
-- Browse the local knowledge graph in the **Graph** tab: inspect courses, modules, items and indexed documents; force a refresh; index documents by hand
+- Browse what CanvasBuddy remembers in the **Memory** tab: inspect courses, modules, items and indexed documents; force a refresh; index documents by hand
 
 ## How it works
 

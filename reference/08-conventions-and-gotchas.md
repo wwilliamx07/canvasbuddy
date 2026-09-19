@@ -54,6 +54,7 @@ Things that are easy to break because the reason for them is not visible at the 
 ## UI
 
 - **Assistant Markdown is rendered only through `renderMarkdown`** (`utils/markdown.ts`: `marked` + DOMPurify allowlist). The model's text is built from Canvas content that other people write; the CSP stops scripts but not `<style>`/`<form>`/`<iframe>`/`<img>` overlays. Don't add another `dangerouslySetInnerHTML` that skips it, and extend the allowlist rather than disabling it.
+- **KaTeX output is inserted after DOMPurify, never through it.** `renderMarkdown`'s math extensions emit a `<span data-math="N">` placeholder (sanitized like any other span); only after sanitizing does it swap each placeholder for `katex.renderToString(...)`. This is safe because KaTeX runs with `trust: false` (only class/style/aria attributes and escaped text, no URLs or scripts) — but it depends on `style` staying out of `ALLOWED_ATTR`, since KaTeX's inline `style=` attributes would otherwise leak into everything else DOMPurify sanitizes. Don't run KaTeX's HTML back through the sanitizer — the allowlist has no `style` attribute and would strip the layout KaTeX needs.
 
 ## Persistence
 

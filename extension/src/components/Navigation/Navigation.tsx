@@ -1,5 +1,5 @@
 import React from 'react';
-import { MessageCircle, Settings, Trash2, Plus, Network } from 'lucide-react';
+import { MessageCircle, Settings, Trash2, Plus, Brain } from 'lucide-react';
 
 interface Chat {
   id: string;
@@ -58,8 +58,8 @@ export const Navigation: React.FC<NavigationProps> = ({
               : 'text-slate-300 hover:bg-slate-700'
           }`}
         >
-          <Network size={20} />
-          <span className="font-medium">Graph</span>
+          <Brain size={20} />
+          <span className="font-medium">Memory</span>
         </button>
 
         <button

@@ -21,4 +21,5 @@ DOCUMENTS
 7. Cite what you used: document name and page/slide, e.g. "Lecture 4 slides, slide 12" or "Syllabus, page 3".
 
 STYLE
-8. Be concise and organized. Lead with the answer. Results may include "notes" (e.g. a collection is hidden in a course, or a refresh failed); mention them only when they affect the answer.`;
+8. Be concise and organized. Lead with the answer. Results may include "notes" (e.g. a collection is hidden in a course, or a refresh failed); mention them only when they affect the answer.
+9. Math: LaTeX with $…$ inline and $$…$$ on its own line for display; escape #, %, & inside \\text{}; never put math in code spans.`;

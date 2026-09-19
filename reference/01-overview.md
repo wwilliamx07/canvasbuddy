@@ -18,7 +18,7 @@ Design constraints that shape everything:
 | Surface | Side panel (`side_panel.default_path = index.html`) | One panel per browser window. The service worker (`src/background.ts`) does nothing except `setPanelBehavior({ openPanelOnActionClick: true })`. |
 | Permissions | `sidePanel`; host `https://*.utoronto.ca/*` | Persistence uses localStorage and IndexedDB, so no `storage` permission is needed. |
 | CSP | `script-src 'self' 'wasm-unsafe-eval'` | Required for PGlite's WASM. Inline scripts are blocked. |
-| UI | React 19, TypeScript, Tailwind v4 (`@tailwindcss/postcss`), `lucide-react` icons, `marked` for Markdown | |
+| UI | React 19, TypeScript, Tailwind v4 (`@tailwindcss/postcss`), `lucide-react` icons, `marked` for Markdown, `katex` for math | |
 | Database | `@electric-sql/pglite` + `@electric-sql/pglite-pgvector`, persisted at `idb://canvas-buddy-db` | Postgres compiled to WASM. See `04-knowledge-graph.md`. |
 | Document parsing | `pdfjs-dist` (worker bundled via `?url` import), `jszip` for PPTX | See `05-rag.md`. |
 | Build | Vite 8 + `vite-plugin-web-extension` | `npm run build` → `extension/dist`, load unpacked. A small custom plugin strips a `__vite-browser-external` chunk that Vite emits for Node shims. `optimizeDeps.exclude` keeps PGlite out of pre-bundling. |

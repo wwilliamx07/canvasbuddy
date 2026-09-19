@@ -600,9 +600,12 @@ export async function upsertAndPruneModuleItems(
   for (const item of items) {
     const itemId = String(item.id);
     validIds.push(itemId);
-    // Files/Assignments/Quizzes carry a numeric content_id; wiki pages are addressed by slug.
+    // Files/Assignments/Quizzes carry a numeric content_id; wiki pages are addressed by slug;
+    // ExternalUrl/ExternalTool point off-Canvas, so content_ref holds their destination URL when Canvas sends one.
     const contentRef = item.type === 'Page' && item.page_url
       ? String(item.page_url)
+      : (item.type === 'ExternalUrl' || item.type === 'ExternalTool') && item.external_url
+      ? String(item.external_url)
       : item.content_id ? String(item.content_id) : null;
 
     await db.query(

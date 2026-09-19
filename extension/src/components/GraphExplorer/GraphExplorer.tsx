@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import {
-  Network,
+  Brain,
   RefreshCw,
   FileText,
   CheckCircle2,
@@ -275,17 +275,17 @@ export const GraphExplorer: React.FC<GraphExplorerProps> = ({ settings }) => {
       <div className="px-5 py-3 border-b border-slate-800 bg-slate-950 flex flex-wrap items-center justify-between gap-3 flex-shrink-0">
         <div className="flex items-center gap-3 min-w-0">
           <div className="p-2 bg-blue-600/20 text-blue-400 rounded-lg flex-shrink-0">
-            <Network size={20} />
+            <Brain size={20} />
           </div>
           <div className="min-w-0">
             <h1 className="text-base font-semibold text-white flex items-center gap-2 min-w-0">
-              <span className="truncate">Knowledge Graph</span>
+              <span className="truncate">Memory</span>
               <span className="hidden md:inline text-xs px-2 py-0.5 rounded-full bg-blue-900/50 text-blue-300 font-normal whitespace-nowrap">
                 PGlite WASM
               </span>
             </h1>
             <p className="hidden md:block text-xs text-slate-400">
-              Interactive structural explorer & client-side vector database
+              What CanvasBuddy remembers about your courses, kept current on demand
             </p>
           </div>
         </div>
@@ -408,7 +408,7 @@ export const GraphExplorer: React.FC<GraphExplorerProps> = ({ settings }) => {
           {courses.length === 0 ? (
             <div className="text-center p-8 bg-slate-950/30 rounded-lg border border-slate-800 border-dashed">
               <BookOpen size={32} className="mx-auto text-slate-600 mb-2" />
-              <p className="text-sm font-medium text-slate-400">No courses in local graph</p>
+              <p className="text-sm font-medium text-slate-400">Nothing remembered yet — ask about a course in Chat, or Sync Courses</p>
               <p className="text-xs text-slate-500 mt-1 max-w-xs mx-auto">
                 Click "Sync Courses" above to pull your active courses from Canvas.
               </p>
@@ -416,7 +416,7 @@ export const GraphExplorer: React.FC<GraphExplorerProps> = ({ settings }) => {
           ) : modulesList.length === 0 ? (
             <div className="text-center p-8 bg-slate-950/30 rounded-lg border border-slate-800 border-dashed">
               <Layers size={32} className="mx-auto text-slate-600 mb-2" />
-              <p className="text-sm font-medium text-slate-400">No modules in local graph</p>
+              <p className="text-sm font-medium text-slate-400">No modules remembered for this course</p>
               <p className="text-xs text-slate-500 mt-1 max-w-xs mx-auto">
                 The agent will fetch this automatically on demand, or click "Refresh Course" to pull module structure now.
               </p>

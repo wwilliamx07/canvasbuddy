@@ -4,7 +4,7 @@ import { DEFAULT_FRESHNESS } from './canvas/freshness';
 export const DEFAULT_SETTINGS: AppSettings = {
   apiKey: '',
   baseUrl: '',
-  model: 'gemini-3.1-flash-lite-preview',
+  model: 'gemini-3.5-flash-lite',
   embeddingModel: 'gemini-embedding-2',
   llmProvider: 'google',
   contextThreshold: 15000,

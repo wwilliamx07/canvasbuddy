@@ -55,9 +55,9 @@ Verified 2026-09-18 on a course whose Home is a front page (`default_view: wiki`
 
 ## Entity types (`types/canvas.ts`)
 
-Thin interfaces for the fields the code reads: `CanvasCourse`, `CanvasModule` (incl. `prerequisite_module_ids`, optional inline `items`), `CanvasModuleItem` (`type`, `content_id`, `page_url`), `CanvasAssignment`, `CanvasPage` (`url` is the slug; `body` only on single-page fetch), `CanvasFile` (`modified_at`/`updated_at` used as version). Ids are typed `number | string` because Canvas returns numbers and the graph stores strings.
+Thin interfaces for the fields the code reads: `CanvasCourse`, `CanvasModule` (incl. `prerequisite_module_ids`, optional inline `items`), `CanvasModuleItem` (`type`, `content_id`, `page_url`, `external_url`), `CanvasAssignment`, `CanvasPage` (`url` is the slug; `body` only on single-page fetch), `CanvasFile` (`modified_at`/`updated_at` used as version). Ids are typed `number | string` because Canvas returns numbers and the graph stores strings.
 
-Module item `type` values seen: `File`, `Page`, `Assignment`, `Quiz`, `Discussion`, `SubHeader`, `ExternalUrl`, `ExternalTool`. Only `File` and `Page` are indexable through module items; assignments are indexed via the assignments collection.
+Module item `type` values seen: `File`, `Page`, `Assignment`, `Quiz`, `Discussion`, `SubHeader`, `ExternalUrl`, `ExternalTool`. Only `File` and `Page` are indexable through module items; assignments are indexed via the assignments collection. `ExternalUrl` / `ExternalTool` carry their destination in `external_url`, stored as `content_ref`.
 
 ## Rate limiting
 
