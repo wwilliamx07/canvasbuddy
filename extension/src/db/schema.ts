@@ -87,6 +87,48 @@ CREATE TABLE IF NOT EXISTS announcements (
   synced_at       TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );
 
+-- 5f. Discussion topics (the course forum). The topic message is stored as text; the reply
+--     tree is fetched on demand into the 'discussion:<id>' document (one chunk per entry) and
+--     replies_synced_for records the last_reply_at those entries correspond to.
+CREATE TABLE IF NOT EXISTS discussions (
+  discussion_id   TEXT PRIMARY KEY,
+  course_id       TEXT REFERENCES courses(course_id) ON DELETE CASCADE,
+  title           TEXT NOT NULL,
+  author          TEXT,
+  posted_at       TIMESTAMPTZ,
+  last_reply_at   TIMESTAMPTZ,
+  reply_count     INT DEFAULT 0,
+  message         TEXT,
+  html_url        TEXT,
+  pinned          BOOLEAN NOT NULL DEFAULT FALSE,
+  locked          BOOLEAN NOT NULL DEFAULT FALSE,
+  assignment_id   TEXT,              -- graded discussions
+  replies_synced_for TEXT,
+  synced_at       TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 5g. Quizzes (the Quizzes tab): the fields the assignments listing lacks — time limit,
+--     attempts, availability window, question count. assignment_id joins the student's submission.
+CREATE TABLE IF NOT EXISTS quizzes (
+  quiz_id          TEXT PRIMARY KEY,
+  course_id        TEXT REFERENCES courses(course_id) ON DELETE CASCADE,
+  title            TEXT NOT NULL,
+  quiz_type        TEXT,
+  time_limit       INT,              -- minutes; NULL = none
+  allowed_attempts INT,              -- -1 = unlimited
+  question_count   INT,
+  points_possible  NUMERIC,
+  due_at           TIMESTAMPTZ,
+  unlock_at        TIMESTAMPTZ,
+  lock_at          TIMESTAMPTZ,
+  published        BOOLEAN NOT NULL DEFAULT TRUE,
+  description      TEXT,             -- HTML → text with link markers
+  assignment_id    TEXT,
+  html_url         TEXT,
+  lock_explanation TEXT,
+  synced_at        TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+
 -- 5d. Planner window (cross-course to-do list; course_id has no FK because the planner may
 --     reference courses that are not in the graph)
 CREATE TABLE IF NOT EXISTS planner_items (
@@ -156,10 +198,10 @@ CREATE TABLE IF NOT EXISTS graph_edges (
   UNIQUE (from_type, from_id, to_type, to_id, relation)
 );
 
--- 7. Indexable documents: Canvas files, plus wiki pages and assignment descriptions.
---    A row with total_chunks = 0 is "known but not indexed".
+-- 7. Indexable documents: Canvas files, plus wiki pages, assignment descriptions, inbox threads,
+--    discussion threads and course syllabi. A row with total_chunks = 0 is "known but not indexed".
 --    file_id is the Canvas file id for files, 'page:<course>:<url>' for pages,
---    'assignment:<id>' for assignment descriptions.
+--    'assignment:<id>', 'conversation:<id>', 'discussion:<id>', 'syllabus:<course>'.
 CREATE TABLE IF NOT EXISTS files (
   file_id         TEXT PRIMARY KEY,
   course_id       TEXT REFERENCES courses(course_id) ON DELETE SET NULL,
@@ -168,7 +210,7 @@ CREATE TABLE IF NOT EXISTS files (
   version         TEXT NOT NULL,
   extracted_at    TIMESTAMPTZ,
   total_chunks    INT DEFAULT 0,
-  source_type     TEXT DEFAULT 'file',   -- 'file' | 'page' | 'assignment'
+  source_type     TEXT DEFAULT 'file',   -- 'file' | 'page' | 'assignment' | 'conversation' | 'discussion' | 'syllabus'
   embedding_model TEXT,                  -- provider/model the stored vectors came from
   html_url        TEXT,
   content_type    TEXT,
@@ -212,12 +254,13 @@ CREATE TABLE IF NOT EXISTS course_tabs (
 );
 
 -- 11. Hyperlinks found in HTML bodies (front page, wiki pages, assignment descriptions,
---     announcements). This is how content the instructor organised as "a page with links"
---     becomes discoverable when the Files/Pages areas are hidden from students.
+--     announcements, discussion topics, quiz descriptions, the syllabus). This is how content the
+--     instructor organised as "a page with links" becomes discoverable when the Files/Pages areas
+--     are hidden from students.
 CREATE TABLE IF NOT EXISTS content_links (
   course_id TEXT REFERENCES courses(course_id) ON DELETE CASCADE,
-  from_type TEXT NOT NULL,    -- 'page' | 'assignment' | 'announcement'
-  from_id   TEXT NOT NULL,    -- page slug / assignment id / announcement id
+  from_type TEXT NOT NULL,    -- 'page' | 'assignment' | 'announcement' | 'discussion' | 'quiz' | 'syllabus'
+  from_id   TEXT NOT NULL,    -- page slug / assignment id / announcement id / discussion id / quiz id / course id
   to_type   TEXT NOT NULL,    -- 'file' | 'page' | 'assignment' | 'quiz' | 'discussion' | 'module' | 'external'
   to_ref    TEXT NOT NULL,    -- file id / page slug / assignment id / … / URL
   label     TEXT,
@@ -227,6 +270,9 @@ CREATE TABLE IF NOT EXISTS content_links (
 
 -- Migrations for databases created by earlier versions (all idempotent)
 ALTER TABLE courses     ADD COLUMN IF NOT EXISTS default_view TEXT;   -- what "Home" shows: wiki | modules | syllabus | assignments | feed
+-- The Syllabus tab's body (raw HTML) and a fingerprint of it; the 'syllabus:<course>' document is indexed from it
+ALTER TABLE courses     ADD COLUMN IF NOT EXISTS syllabus_body    TEXT;
+ALTER TABLE courses     ADD COLUMN IF NOT EXISTS syllabus_version TEXT;
 ALTER TABLE pages       ADD COLUMN IF NOT EXISTS front_page   BOOLEAN NOT NULL DEFAULT FALSE;
 ALTER TABLE courses     ADD COLUMN IF NOT EXISTS modules_synced_at     TIMESTAMPTZ;
 ALTER TABLE courses     ADD COLUMN IF NOT EXISTS assignments_synced_at TIMESTAMPTZ;
@@ -279,6 +325,8 @@ CREATE INDEX IF NOT EXISTS idx_files_course ON files(course_id);
 CREATE INDEX IF NOT EXISTS idx_pages_course ON pages(course_id);
 CREATE INDEX IF NOT EXISTS idx_submissions_course ON submissions(course_id);
 CREATE INDEX IF NOT EXISTS idx_announcements_course ON announcements(course_id, posted_at DESC);
+CREATE INDEX IF NOT EXISTS idx_discussions_course ON discussions(course_id, last_reply_at DESC);
+CREATE INDEX IF NOT EXISTS idx_quizzes_course ON quizzes(course_id, due_at);
 CREATE INDEX IF NOT EXISTS idx_planner_date ON planner_items(date);
 CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_messages_tsv ON messages USING GIN(body_tsv);

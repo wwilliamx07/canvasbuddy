@@ -6,7 +6,7 @@ This folder is the map of the project for developers and agents. Each document c
 |---|---|---|
 | [01-overview.md](01-overview.md) | What the product is, runtime environment, build, directory layout, data-flow diagram | `manifest.json`, `vite.config.ts`, `src/main.tsx`, `src/background.ts` |
 | [02-agent-loop.md](02-agent-loop.md) | Conversation model, provider adapters (Gemini/OpenAI), the tool-calling loop, persisted tool turns, digests and thresholds | `src/App.tsx` |
-| [03-tools.md](03-tools.md) | The 7 graph-backed tools, the "kept current on demand" rule, document ids, the system prompt, how to add a tool | `src/agent/tools.ts`, `src/agent/prompt.ts` |
+| [03-tools.md](03-tools.md) | The 8 graph-backed tools, the "kept current on demand" rule, document ids, the system prompt, how to add a tool | `src/agent/tools.ts`, `src/agent/prompt.ts` |
 | [04-knowledge-graph.md](04-knowledge-graph.md) | PGlite database, schema, graph queries, sync + prune semantics, the freshness engine (`ensureCollection`, `sync_state`, TTLs, probes, unavailable collections) | `src/db/pglite.ts`, `src/db/schema.ts`, `src/db/graph.ts`, `src/canvas/freshness.ts`, `src/canvas/collections.ts` |
 | [05-rag.md](05-rag.md) | Document indexing pipeline, chunking, embeddings, hybrid search | `src/canvas/sync.ts`, `src/db/rag.ts`, `src/embeddings/embeddingClient.ts`, `src/utils/textExtractor.ts` |
 | [06-canvas-api.md](06-canvas-api.md) | How the extension authenticates to Canvas, endpoints used, pagination, response shapes | `src/canvas/http.ts`, `src/canvas/collections.ts`, `src/canvas/sync.ts`, `src/types/canvas.ts` |
@@ -15,7 +15,7 @@ This folder is the map of the project for developers and agents. Each document c
 
 ## One-paragraph summary
 
-CanvasBuddy is a Manifest V3 Chrome side-panel extension that runs an LLM agent over a student's Canvas (Quercus, University of Toronto) account. Everything runs client-side: the React UI, a Postgres-in-WASM database (PGlite + pgvector, persisted in IndexedDB) that holds a local knowledge graph of courses/modules/assignments/files/pages plus a vector index of document text, and the agent loop that calls Gemini or OpenAI with the user's own API key. Canvas is reached with the browser's existing session cookies. The agent's seven tools all read the local graph; a freshness engine (per-collection TTLs, cheap change probes where Canvas offers one, per-course "unavailable" tracking) brings each collection up to date before it is read, so the model never decides between live and cached data.
+CanvasBuddy is a Manifest V3 Chrome side-panel extension that runs an LLM agent over a student's Canvas (Quercus, University of Toronto) account. Everything runs client-side: the React UI, a Postgres-in-WASM database (PGlite + pgvector, persisted in IndexedDB) that holds a local knowledge graph of courses/modules/assignments/files/pages plus a vector index of document text, and the agent loop that calls Gemini or OpenAI with the user's own API key. Canvas is reached with the browser's existing session cookies. The agent's eight tools all read the local graph; a freshness engine (per-collection TTLs, cheap change probes where Canvas offers one, per-course "unavailable" tracking) brings each collection up to date before it is read, so the model never decides between live and cached data.
 
 ## Keeping this reference current
 

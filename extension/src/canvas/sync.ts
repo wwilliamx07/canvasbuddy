@@ -1,6 +1,6 @@
 import type { AppSettings } from '../components/Settings/Settings';
 import type { CanvasAssignment, CanvasFile, CanvasPage } from '../types/canvas';
-import { setAssignmentDescription } from '../db/graph';
+import { setAssignmentDescription, getCourseSyllabus } from '../db/graph';
 import {
   docIdFor,
   getDocumentCacheState,
@@ -253,8 +253,27 @@ async function loadDocumentSource(target: IndexTarget): Promise<DocumentSource> 
     };
   }
 
+  if (sourceType === 'syllabus') {
+    // The body was stored by the syllabus collection (the tool ensured it before calling here)
+    const course = String(courseId || sourceId);
+    const syllabus = await getCourseSyllabus(course);
+    if (!syllabus) throw new Error(`Course ${course} has no syllabus on its Syllabus tab.`);
+    const text = await ingestHtml(course, 'syllabus', course, syllabus.body);
+    return {
+      docId: docIdFor('syllabus', course),
+      title: 'Syllabus',
+      version: syllabus.version,
+      htmlUrl: null,
+      courseId: course,
+      loadPages: async () => (text ? [{ pageNumber: 1, text }] : []),
+    };
+  }
+
   if (sourceType === 'conversation') {
     throw new Error('Inbox threads are indexed automatically when the inbox is synced; call get_inbox first.');
+  }
+  if (sourceType === 'discussion') {
+    throw new Error('Discussion threads are read through get_discussions / read_document(document_type="discussion").');
   }
 
   throw new Error(`Unsupported source type: ${sourceType}`);

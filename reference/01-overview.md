@@ -41,7 +41,7 @@ canvasbuddy/
         ├── App.tsx            ← agent loop, provider adapters, history/digests, chat state
         ├── agent/
         │   ├── prompt.ts      ← SYSTEM_PROMPT
-        │   └── tools.ts       ← TOOL_CONFIG + implementations (7 graph-backed tools)
+        │   └── tools.ts       ← TOOL_CONFIG + implementations (8 graph-backed tools)
         ├── components/
         │   ├── ChatUI/        ← message list + input
         │   ├── Navigation/    ← left rail: tabs + chat list

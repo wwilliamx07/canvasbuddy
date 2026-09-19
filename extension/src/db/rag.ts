@@ -1,7 +1,7 @@
 import { getDB, q, withTransaction, type Queryable } from './pglite';
 import type { CanvasFile, RetrievedChunk } from '../types/canvas';
 
-export type DocumentSourceType = 'file' | 'page' | 'assignment' | 'conversation';
+export type DocumentSourceType = 'file' | 'page' | 'assignment' | 'conversation' | 'discussion' | 'syllabus';
 
 /** The files.file_id (document id) for a source; mirrored by the joins in graph.ts and the Graph Explorer. */
 export function docIdFor(sourceType: DocumentSourceType, sourceId: string, courseId?: string | null): string {
@@ -14,6 +14,11 @@ export function docIdFor(sourceType: DocumentSourceType, sourceId: string, cours
       return `assignment:${sourceId}`;
     case 'conversation':
       return `conversation:${sourceId}`;
+    case 'discussion':
+      return `discussion:${sourceId}`;
+    case 'syllabus':
+      // one per course: the source id is the course id
+      return `syllabus:${sourceId}`;
   }
 }
 
@@ -229,9 +234,11 @@ export async function upsertDocumentChunksIncremental(params: {
   embeddingModel: string | null;
   htmlUrl?: string | null;
   chunks: Array<{ chunkId: string; chunkIndex: number; content: string; embedding: number[] | null }>;
+  /** Delete stored chunks that are not in `chunks` (pass true only with the complete entry list). */
+  pruneMissing?: boolean;
 }): Promise<{ inserted: number }> {
   const db = await getDB();
-  const { docId, sourceType, courseId, title, version, embeddingModel, htmlUrl, chunks } = params;
+  const { docId, sourceType, courseId, title, version, embeddingModel, htmlUrl, chunks, pruneMissing } = params;
 
   // course_id is looked up so a conversation about a course outside the graph does not violate the FK
   await db.query(
@@ -247,15 +254,24 @@ export async function upsertDocumentChunksIncremental(params: {
 
   let inserted = 0;
   for (const c of chunks) {
+    // An entry whose text changed (edited reply) drops its vector so it is re-embedded on next use
     const res = await db.query<{ inserted: boolean }>(
       `INSERT INTO file_chunks (chunk_id, file_id, chunk_index, page_number, content, token_count, embedding, content_tsv)
        VALUES ($1, $2, $3, NULL, $4, $5, $6::vector, to_tsvector('english', $4))
        ON CONFLICT (chunk_id) DO UPDATE SET
-         embedding = COALESCE(EXCLUDED.embedding, file_chunks.embedding)
+         chunk_index = EXCLUDED.chunk_index,
+         embedding = CASE WHEN file_chunks.content = EXCLUDED.content
+                          THEN COALESCE(EXCLUDED.embedding, file_chunks.embedding) ELSE EXCLUDED.embedding END,
+         content = EXCLUDED.content,
+         token_count = EXCLUDED.token_count,
+         content_tsv = EXCLUDED.content_tsv
        RETURNING (xmax = 0) AS inserted`,
       [c.chunkId, String(docId), c.chunkIndex, c.content, Math.ceil(c.content.length / 4), c.embedding ? formatVector(c.embedding) : null]
     );
     if (res.rows[0]?.inserted) inserted++;
+  }
+  if (pruneMissing) {
+    await db.query('DELETE FROM file_chunks WHERE file_id = $1 AND chunk_id <> ALL($2::text[])', [String(docId), chunks.map((c) => c.chunkId)]);
   }
   await db.query(
     'UPDATE files SET total_chunks = (SELECT COUNT(*) FROM file_chunks WHERE file_id = $1) WHERE file_id = $1',

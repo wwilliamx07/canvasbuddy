@@ -6,13 +6,15 @@ Sources: `src/canvas/sync.ts` (`indexDocumentJustInTime`, `loadDocumentSource`, 
 
 Documents are indexed **just in time**, not in bulk: nothing is downloaded or embedded until the agent (or the user in the Graph Explorer) asks for a specific document. This is a rule, not an optimization: **no sync ever spends embedding calls**; vectors are computed only for a document a semantic search is about to look through. Indexing stores page-bound chunks with 768-d vectors and a full-text index in PGlite; search fuses vector and keyword ranking. Answers cite the document and page/slide range because every chunk records exactly which pages it covers.
 
-Four document kinds live in the same tables (`DocumentSourceType = 'file' | 'page' | 'assignment' | 'conversation'`); the first three share the JIT pipeline below, inbox threads are indexed incrementally during the inbox sync:
+Six document kinds live in the same tables (`DocumentSourceType = 'file' | 'page' | 'assignment' | 'conversation' | 'discussion' | 'syllabus'`); files, pages, assignments and the syllabus share the JIT pipeline below, while inbox and discussion threads are stored incrementally as entries:
 
 | Kind | `source_id` | `docId` in `files` | Text source |
 |---|---|---|---|
 | Canvas file (PDF, PPTX) | file id | file id | download via `/files/:id/public_url`, parse |
 | Wiki page | page slug | `page:<course>:<slug>` | `body` from `/courses/:id/pages/:slug` (falls back to `/front_page` for the front page), through `ingestHtml` → text with link markers; the page's links are recorded on every fetch |
 | Assignment description | assignment id | `assignment:<id>` | `description` from `/courses/:id/assignments/:id` (also cached into `assignments.description`), through `ingestHtml` |
+| Syllabus | course id | `syllabus:<course>` | `courses.syllabus_body`, stored by the `syllabus` collection (the tool ensures it first), through `ingestHtml` |
+| Discussion thread | discussion id | `discussion:<id>` | `/courses/:c/discussion_topics/:id/view`, fetched by `ensureDiscussionThread` when the topic's `last_reply_at` moved; chunk 0 = the topic, then one chunk per reply ("author (date) replying to X: text"), keyed by entry id, NULL vector. `embedDiscussionIfNeeded` embeds on first semantic search. |
 | Inbox thread | conversation id | `conversation:<id>` | messages from `/conversations/:id` during the inbox sync; one chunk per message, chunk id = message id, stored with a NULL vector. `embedConversationIfNeeded` (called by `search_documents` when it targets the thread) embeds only the messages still lacking a vector. |
 
 Doc ids come from `docIdFor()` in `db/rag.ts`; nothing else builds them by hand.
@@ -57,7 +59,7 @@ Points worth knowing:
 ## Storage (`db/rag.ts`)
 
 - `storeChunksWithEmbeddings` (files/pages/assignments) upserts the `files` row, deletes existing chunks for the doc, and inserts new ones with `page_end`, `content_hash`, `embedding = $::vector` (a fresh vector or a literal reused via `getStoredEmbeddingsByHash`) and `content_tsv = to_tsvector('english', content)`.
-- `upsertDocumentChunksIncremental` (conversations) keys chunks by a stable id, inserts only new ones, always with a NULL vector; `getChunksMissingEmbedding` / `setChunkEmbeddings` fill vectors in when `embedConversationIfNeeded` runs.
+- `upsertDocumentChunksIncremental` (conversations, discussions) keys chunks by a stable id: new ones are inserted with a NULL vector, an entry whose text changed is updated and loses its vector, unchanged ones keep theirs; with `pruneMissing` (discussions pass the complete tree) entries no longer present are deleted. `getChunksMissingEmbedding` / `setChunkEmbeddings` fill vectors in when `embedThreadIfNeeded` runs.
 - `upsertAndPruneKnownFiles` (files collection sync) registers files with `total_chunks = 0` and resets `total_chunks` to 0 when the version changed. The old chunks are **kept** as a vector cache for the next index but are invisible: every reader (`searchChunksHybrid`, `getFileChunks`, `getGraphStatistics`) filters on `files.total_chunks > 0`.
 - Indexes: GIN on `content_tsv`; B-tree on `file_id`, `course_id`; **HNSW** (`vector_cosine_ops`) on `embedding`. The vector half of every search walks the HNSW index regardless of table size: `searchChunksHybrid` runs with `SET LOCAL enable_sort = off`, which makes the index's ordered scan the only cheap way to satisfy `ORDER BY embedding <=> q` (the keyword half still sorts, as it must). `hnsw.iterative_scan = relaxed_order` and a raised `hnsw.max_scan_tuples` (both set in `pglite.ts`) make a filtered scan — one course, or one document among thousands of chunks — keep walking the graph until the `LIMIT` is met instead of returning fewer rows. PGlite has no autovacuum launcher, so the chunk writers run `ANALYZE file_chunks` (milliseconds) after each write so the keyword half and the joins are planned from real statistics. HNSW inserts cost ~1 ms per vector, negligible next to the embedding call. Measured at 3k chunks: global 4 ms, one-course and one-document searches 7–16 ms.
 
@@ -80,7 +82,7 @@ result = fused ⋈ file_chunks ⋈ files ⋈ courses, plus ONE module name via L
 ## Callers
 
 - Agent: `search_documents` (indexes the named document via `indexDocumentJustInTime` when `document_id` is given, then `getEmbedding(query)` + `searchChunksHybrid`), `read_document` (indexes if needed, then `getFileChunks(docId, pageRange)` — a chunk is returned when its page range overlaps the requested one).
-- Inbox sync (`canvas/collections.ts`): stores thread messages as text; `embedConversationIfNeeded` embeds on first semantic search.
+- Inbox sync (`canvas/collections.ts`): stores thread messages as text; `embedConversationIfNeeded` embeds on first semantic search. Discussions: `ensureDiscussionThread` stores the reply tree when read; `embedDiscussionIfNeeded` embeds on first semantic search.
 - Graph Explorer: the "Index for search" button on a selected file/page/assignment node calls the same `indexDocumentJustInTime`; `getFileChunks(docId)` shows stored chunks in the side panel.
 
 ## Extending

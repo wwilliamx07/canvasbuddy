@@ -6,15 +6,15 @@ CanvasBuddy is a personal AI agent for Canvas LMS — built on the University of
 
 - Answer "what's due this week / what am I missing" from your planner across all courses
 - Find lectures, files and pages inside course modules — or on the course home page, where many courses keep them — and know what each course's nav bar offers (Piazza, lecture recordings…); list assignments with due dates, points and your submission status or grade
-- Search inside PDFs, slides, wiki pages, assignment descriptions and inbox threads (semantic + keyword), citing the page or slide
+- Search inside PDFs, slides, wiki pages, assignment descriptions, the syllabus, discussion threads and inbox threads (semantic + keyword), citing the page or slide
 - Read specific pages/slides of a document, or a whole message thread, verbatim
-- Show recent announcements and inbox conversations
+- Show recent announcements, discussion topics (and read their replies), quiz rules (time limit, attempts, availability) and inbox conversations
 - Keep multiple chat threads locally
 - Browse what CanvasBuddy remembers in the **Memory** tab: inspect courses, modules, items and indexed documents; force a refresh; index documents by hand
 
 ## How it works
 
-**One source of knowledge, kept current on demand.** All seven agent tools read a local copy of your Canvas data stored in PGlite (Postgres compiled to WASM, with pgvector, persisted in IndexedDB). Before a tool reads a collection, a freshness engine decides whether that collection is missing, stale, or unchanged:
+**One source of knowledge, kept current on demand.** All eight agent tools read a local copy of your Canvas data stored in PGlite (Postgres compiled to WASM, with pgvector, persisted in IndexedDB). Before a tool reads a collection, a freshness engine decides whether that collection is missing, stale, or unchanged:
 
 - each collection has a max age (TTL) you can edit in **Settings → Freshness**;
 - within the TTL, collections that Canvas offers a cheap change check for (modules, announcements, inbox) are probed and updated only if something changed — e.g. only the modules whose item count moved are re-fetched, only inbox threads with a new message are re-read;

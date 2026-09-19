@@ -41,6 +41,10 @@ Newest-N collections (announcements, inbox) pass `maxPages` and accept that olde
 | Published pages (list / probe) | `GET /courses/:c/pages?published=true&sort=updated_at&order=desc[&per_page=1]` | `pages` sync / probe — 404 when the course hides Pages |
 | Single page with body | `GET /courses/:c/pages/:slug` | page indexing (works even when the Pages listing is 404) |
 | Announcements (list / probe) | `GET /courses/:c/discussion_topics?only_announcements=true[&per_page=1]` | `announcements` sync / probe |
+| Discussion topics (list / probe) | `GET /courses/:c/discussion_topics?order_by=recent_activity[&per_page=1]` | `discussions` sync / probe (announcements are excluded without `only_announcements`) |
+| Discussion replies | `GET /courses/:c/discussion_topics/:id/view` | `ensureDiscussionThread`, when the topic's `last_reply_at` moved; the whole tree in one response (`participants`, nested `view[].replies`), deleted entries skipped |
+| Quizzes | `GET /courses/:c/quizzes` | `quizzes` sync (time limit, attempts, question count, availability, `assignment_id`) |
+| Syllabus | `GET /courses/:c?include[]=syllabus_body` | `syllabus` probe + sync (the body is fingerprinted; there is no timestamp) |
 | Planner | `GET /planner/items?start_date&end_date` | `planner` sync (rolling window) and `get_planner` for ranges outside it (live, not stored) |
 | Inbox list (list / probe) | `GET /conversations[?per_page=1]` | `inbox` sync / probe |
 | Inbox thread | `GET /conversations/:id` | `inbox` sync, for conversations whose `last_message_at` moved |

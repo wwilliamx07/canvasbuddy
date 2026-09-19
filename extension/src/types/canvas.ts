@@ -203,3 +203,93 @@ export interface ShapedMessage {
   created_at: string | null;
   body: string;
 }
+
+// ---------------------------------------------------------------------------
+// Discussions (course forums), quizzes, syllabus
+// ---------------------------------------------------------------------------
+
+/** GET /courses/:c/discussion_topics — announcements are the same object with only_announcements */
+export interface CanvasDiscussionTopic {
+  id: number | string;
+  title?: string;
+  message?: string | null;
+  posted_at?: string | null;
+  last_reply_at?: string | null;
+  discussion_subentry_count?: number;
+  html_url?: string;
+  author?: { display_name?: string };
+  user_name?: string;
+  pinned?: boolean;
+  locked?: boolean;
+  assignment_id?: number | string | null; // set for graded discussions
+  published?: boolean;
+}
+
+/** GET /courses/:c/discussion_topics/:id/view — the whole reply tree in one response */
+export interface CanvasDiscussionView {
+  participants?: Array<{ id: number | string; display_name?: string }>;
+  view?: CanvasDiscussionEntry[];
+}
+
+export interface CanvasDiscussionEntry {
+  id: number | string;
+  user_id?: number | string;
+  message?: string | null;
+  created_at?: string;
+  deleted?: boolean;
+  replies?: CanvasDiscussionEntry[];
+}
+
+export interface ShapedDiscussion {
+  discussion_id: string;
+  title: string;
+  author: string | null;
+  posted_at: string | null;
+  last_reply_at: string | null;
+  reply_count: number;
+  /** Topic message as text with link markers, clipped */
+  message: string;
+  html_url: string | null;
+  pinned: boolean;
+  locked: boolean;
+  assignment_id: string | null;
+}
+
+/** GET /courses/:c/quizzes */
+export interface CanvasQuiz {
+  id: number | string;
+  title?: string;
+  html_url?: string;
+  quiz_type?: string; // practice_quiz | assignment | graded_survey | survey
+  time_limit?: number | null; // minutes
+  allowed_attempts?: number | null; // -1 = unlimited
+  question_count?: number | null;
+  points_possible?: number | string | null;
+  due_at?: string | null;
+  lock_at?: string | null;
+  unlock_at?: string | null;
+  published?: boolean;
+  description?: string | null;
+  assignment_id?: number | string | null;
+  locked_for_user?: boolean;
+  lock_explanation?: string | null;
+}
+
+export interface ShapedQuiz {
+  quiz_id: string;
+  title: string;
+  quiz_type: string | null;
+  time_limit: number | null;
+  allowed_attempts: number | null;
+  question_count: number | null;
+  points_possible: number | null;
+  due_at: string | null;
+  unlock_at: string | null;
+  lock_at: string | null;
+  published: boolean;
+  /** Description as text with link markers, clipped */
+  description: string | null;
+  assignment_id: string | null;
+  html_url: string | null;
+  lock_explanation: string | null;
+}

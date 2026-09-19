@@ -18,7 +18,10 @@ export type CollectionKind =
   | 'announcements'
   | 'planner'
   | 'inbox'
-  | 'home';
+  | 'home'
+  | 'discussions'
+  | 'quizzes'
+  | 'syllabus';
 
 /** All values in minutes. Editable in Settings; merged over DEFAULT_FRESHNESS. */
 export interface FreshnessSettings {
@@ -33,6 +36,11 @@ export interface FreshnessSettings {
   inbox: number;
   /** The course front page and the files/pages it links to. */
   home: number;
+  /** Discussion topics (replies are fetched when a thread is read). */
+  discussions: number;
+  quizzes: number;
+  /** The Syllabus tab body. */
+  syllabus: number;
   /** Skip re-probing a scope that was checked this recently (one tool loop touches a scope many times). */
   probeDebounce: number;
   /** How long to remember that a course hides a collection (403/404) before trying again. */
@@ -52,6 +60,9 @@ export const DEFAULT_FRESHNESS: FreshnessSettings = {
   planner: 15,
   inbox: 15,
   home: 1 * D,
+  discussions: 30,
+  quizzes: 12 * H,
+  syllabus: 1 * D,
   probeDebounce: 3,
   unavailableRetry: 1 * D,
 };

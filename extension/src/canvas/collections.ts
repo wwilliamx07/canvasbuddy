@@ -25,6 +25,11 @@ import {
   replaceCourseTabs,
   setFrontPage,
   storeContentLinks,
+  upsertAndPruneDiscussions,
+  getDiscussionRow,
+  setDiscussionRepliesSynced,
+  upsertAndPruneQuizzes,
+  setCourseSyllabus,
 } from '../db/graph';
 import { ingestHtml } from './links';
 import {
@@ -50,7 +55,14 @@ import type {
   ShapedPlannerItem,
   ShapedConversation,
   ShapedMessage,
+  CanvasDiscussionTopic,
+  CanvasDiscussionView,
+  CanvasDiscussionEntry,
+  ShapedDiscussion,
+  CanvasQuiz,
+  ShapedQuiz,
 } from '../types/canvas';
+import { htmlToText } from '../utils/textExtractor';
 
 /**
  * Registry of every collection the freshness engine keeps current. Each entry declares how to
@@ -64,7 +76,9 @@ import type {
  *   files, pages  newest updated_at via sort=updated_at — unverified (403/404 on all probed
  *                 courses); feature-detected, falls back to TTL
  *   home          front page updated_at (the probe fetch doubles as the sync's input)          ✓
- *   courses, assignments, submissions, planner — no narrow query exists; TTL only
+ *   discussions   newest recent-activity topic id:last_reply_at — unverified
+ *   syllabus      the body itself is the probe (one course fetch), fingerprinted by length+hash
+ *   courses, assignments, submissions, planner, quizzes — no narrow query exists; TTL only
  */
 
 function requireCourse(ctx: ScopeContext, kind: string): string {
@@ -486,18 +500,22 @@ function shapeMessages(thread: CanvasConversation): ShapedMessage[] {
 }
 
 /**
- * Embeds the messages of one thread that have no vector yet. Called only when a semantic search is
- * about to target this thread — the inbox sync never embeds. Returns how many messages were embedded.
+ * Embeds the entries of one thread document (inbox conversation, discussion topic) that have no
+ * vector yet. Called only when a semantic search is about to target the thread — no sync embeds.
+ * Returns how many entries were embedded.
  */
-export async function embedConversationIfNeeded(conversationId: string, settings: AppSettings): Promise<number> {
-  const docId = docIdFor('conversation', conversationId);
+async function embedThreadIfNeeded(docId: string, header: string, settings: AppSettings): Promise<number> {
   const missing = await getChunksMissingEmbedding(docId);
   if (missing.length === 0) return 0;
-  const subject = await getConversationSubject(conversationId);
   const model = resolveEmbeddingModel(settings);
-  const vectors = await batchEmbed(missing.map((m) => `Inbox · ${subject}\n${m.content}`), settings, 'document');
+  const vectors = await batchEmbed(missing.map((m) => `${header}\n${m.content}`), settings, 'document');
   await setChunkEmbeddings(docId, missing.map((m, i) => ({ chunkId: m.chunk_id, embedding: vectors[i] })), model);
   return missing.length;
+}
+
+export async function embedConversationIfNeeded(conversationId: string, settings: AppSettings): Promise<number> {
+  const subject = await getConversationSubject(conversationId);
+  return embedThreadIfNeeded(docIdFor('conversation', conversationId), `Inbox · ${subject}`, settings);
 }
 
 const inbox: CollectionSpec = {
@@ -589,6 +607,204 @@ const home: CollectionSpec = {
 };
 
 // ---------------------------------------------------------------------------
+// discussions — topic list with a recent-activity probe; the reply tree of a topic is fetched
+// only when something reads it (ensureDiscussionThread), into the 'discussion:<id>' document
+// ---------------------------------------------------------------------------
+
+const DISCUSSION_MESSAGE_MAX = 4000;
+const DISCUSSION_ENTRY_MAX = 4000;
+
+async function shapeDiscussion(courseId: string, t: CanvasDiscussionTopic, tx: Queryable): Promise<ShapedDiscussion> {
+  return {
+    discussion_id: String(t.id),
+    title: t.title || '(untitled)',
+    author: t.author?.display_name || t.user_name || null,
+    posted_at: t.posted_at ?? null,
+    last_reply_at: t.last_reply_at ?? null,
+    reply_count: t.discussion_subentry_count ?? 0,
+    message: clip(await ingestHtml(courseId, 'discussion', String(t.id), t.message, tx), DISCUSSION_MESSAGE_MAX) || '',
+    html_url: t.html_url || null,
+    pinned: Boolean(t.pinned),
+    locked: Boolean(t.locked),
+    assignment_id: t.assignment_id != null ? String(t.assignment_id) : null,
+  };
+}
+
+const discussions: CollectionSpec = {
+  kind: 'discussions',
+  probe: async (ctx, state) => {
+    const courseId = requireCourse(ctx, 'discussions');
+    const rows = await canvasGet<CanvasDiscussionTopic[]>(
+      `/courses/${courseId}/discussion_topics?order_by=recent_activity&per_page=1`, `discussions probe for course ${courseId}`);
+    const marker = rows[0] ? `${rows[0].id}:${rows[0].last_reply_at}:${rows[0].posted_at}` : 'empty';
+    return marker === state.fingerprint ? { kind: 'unchanged' } : { kind: 'changed' };
+  },
+  sync: async (ctx) => {
+    const courseId = requireCourse(ctx, 'discussions');
+    // Newest 100 by activity; older topics are pruned (the prune only sees what was fetched)
+    const list = await fetchAllPages<CanvasDiscussionTopic>(
+      `/courses/${courseId}/discussion_topics?order_by=recent_activity&per_page=50`, `discussions for course ${courseId}`, 2);
+    const r = await withTransaction(async (tx) => {
+      const rows: ShapedDiscussion[] = [];
+      for (const t of list) rows.push(await shapeDiscussion(courseId, t, tx));
+      return upsertAndPruneDiscussions(courseId, rows, tx);
+    });
+    const marker = list[0] ? `${list[0].id}:${list[0].last_reply_at}:${list[0].posted_at}` : 'empty';
+    return { fingerprint: marker, summary: `${r.upserted} discussion topics, ${r.pruned} pruned` };
+  },
+};
+
+/** The reply tree flattened in reading order, each entry knowing whom it answers. */
+function flattenEntries(
+  entries: CanvasDiscussionEntry[],
+  names: Map<string, string>,
+  parentAuthor: string | null,
+  out: Array<{ id: string; author: string; parentAuthor: string | null; createdAt: string; text: string }>
+): void {
+  for (const e of entries) {
+    if (e.deleted) continue;
+    const author = e.user_id != null ? names.get(String(e.user_id)) || 'Unknown' : 'Unknown';
+    const text = htmlToText(e.message || '').trim();
+    if (text) out.push({ id: String(e.id), author, parentAuthor, createdAt: e.created_at || '', text: clip(text, DISCUSSION_ENTRY_MAX)! });
+    if (e.replies?.length) flattenEntries(e.replies, names, author, out);
+  }
+}
+
+/**
+ * Brings the 'discussion:<id>' document up to date with the topic's replies: fetched only when
+ * last_reply_at moved since the entries were stored. Text only — no embedding here. Returns a
+ * note for the model, or null when nothing was fetched.
+ */
+export async function ensureDiscussionThread(courseId: string, discussionId: string): Promise<string | null> {
+  const topic = await getDiscussionRow(discussionId);
+  if (!topic) throw new Error(`Discussion ${discussionId} is not in course ${courseId}'s discussions. Call get_discussions first.`);
+  const version = topic.last_reply_at ? new Date(topic.last_reply_at).toISOString() : 'no-replies';
+  if (topic.replies_synced_for === version) return null;
+
+  const view = await canvasGet<CanvasDiscussionView>(
+    `/courses/${courseId}/discussion_topics/${discussionId}/view`, `replies of discussion ${discussionId}`);
+  const names = new Map((view.participants || []).map((p) => [String(p.id), p.display_name || 'Unknown']));
+  const entries: Array<{ id: string; author: string; parentAuthor: string | null; createdAt: string; text: string }> = [];
+  flattenEntries(Array.isArray(view.view) ? view.view : [], names, null, entries);
+
+  const docId = docIdFor('discussion', discussionId);
+  const topicDate = (topic.posted_at ? new Date(topic.posted_at).toISOString() : '').slice(0, 10);
+  const chunks = [
+    {
+      chunkId: `${docId}:topic`,
+      chunkIndex: 0,
+      content: `[topic] ${topic.author || 'Unknown'} (${topicDate}): ${topic.title}\n${topic.message || ''}`.trim(),
+      embedding: null,
+    },
+    ...entries.map((e, i) => ({
+      chunkId: `${docId}:entry:${e.id}`,
+      chunkIndex: i + 1,
+      content: `${e.author} (${e.createdAt.slice(0, 10)})${e.parentAuthor ? ` replying to ${e.parentAuthor}` : ''}: ${e.text}`,
+      embedding: null,
+    })),
+  ];
+  await upsertDocumentChunksIncremental({
+    docId,
+    sourceType: 'discussion',
+    courseId: String(courseId),
+    title: `Discussion: ${topic.title}`,
+    version,
+    embeddingModel: null,
+    htmlUrl: topic.html_url,
+    chunks,
+    pruneMissing: true,
+  });
+  await setDiscussionRepliesSynced(discussionId, version);
+  return `Read ${entries.length} replies of "${topic.title}".`;
+}
+
+export async function embedDiscussionIfNeeded(discussionId: string, settings: AppSettings): Promise<number> {
+  const topic = await getDiscussionRow(discussionId);
+  return embedThreadIfNeeded(docIdFor('discussion', discussionId), `Discussion · ${topic?.title || discussionId}`, settings);
+}
+
+// ---------------------------------------------------------------------------
+// quizzes — the Quizzes tab; TTL only (403/404 when the course hides it)
+// ---------------------------------------------------------------------------
+
+const QUIZ_DESCRIPTION_MAX = 2000;
+
+async function shapeQuiz(courseId: string, z: CanvasQuiz, tx: Queryable): Promise<ShapedQuiz> {
+  return {
+    quiz_id: String(z.id),
+    title: z.title || '(untitled)',
+    quiz_type: z.quiz_type || null,
+    time_limit: z.time_limit ?? null,
+    allowed_attempts: z.allowed_attempts ?? null,
+    question_count: z.question_count ?? null,
+    points_possible: z.points_possible != null ? Number(z.points_possible) : null,
+    due_at: z.due_at ?? null,
+    unlock_at: z.unlock_at ?? null,
+    lock_at: z.lock_at ?? null,
+    published: z.published ?? true,
+    description: clip(await ingestHtml(courseId, 'quiz', String(z.id), z.description, tx), QUIZ_DESCRIPTION_MAX),
+    assignment_id: z.assignment_id != null ? String(z.assignment_id) : null,
+    html_url: z.html_url || null,
+    lock_explanation: z.locked_for_user ? clip(z.lock_explanation ? htmlToText(z.lock_explanation) : 'locked', 300) : null,
+  };
+}
+
+const quizzes: CollectionSpec = {
+  kind: 'quizzes',
+  sync: async (ctx) => {
+    const courseId = requireCourse(ctx, 'quizzes');
+    const list = await fetchAllPages<CanvasQuiz>(`/courses/${courseId}/quizzes?per_page=100`, `quizzes for course ${courseId}`);
+    const r = await withTransaction(async (tx) => {
+      const rows: ShapedQuiz[] = [];
+      for (const z of list) rows.push(await shapeQuiz(courseId, z, tx));
+      return upsertAndPruneQuizzes(courseId, rows, tx);
+    });
+    return { summary: `${r.upserted} quizzes, ${r.pruned} pruned` };
+  },
+};
+
+// ---------------------------------------------------------------------------
+// syllabus — the Syllabus tab body. Canvas gives it no timestamp, so the probe fetches the body
+// (one course object) and fingerprints it; the fetch is handed to the sync when it changed.
+// ---------------------------------------------------------------------------
+
+function syllabusFingerprint(body: string | null | undefined): string {
+  if (!body) return 'none';
+  let h = 0;
+  for (let i = 0; i < body.length; i++) h = (h * 31 + body.charCodeAt(i)) | 0;
+  return `${body.length}:${(h >>> 0).toString(16)}`;
+}
+
+async function fetchSyllabusBody(courseId: string): Promise<string | null> {
+  const course = await canvasGet<{ syllabus_body?: string | null }>(
+    `/courses/${courseId}?include[]=syllabus_body`, `syllabus of course ${courseId}`);
+  const body = course.syllabus_body?.trim();
+  return body ? body : null;
+}
+
+const syllabus: CollectionSpec = {
+  kind: 'syllabus',
+  probe: async (ctx, state) => {
+    const courseId = requireCourse(ctx, 'syllabus');
+    const body = await fetchSyllabusBody(courseId);
+    return syllabusFingerprint(body) === state.fingerprint ? { kind: 'unchanged' } : { kind: 'changed', data: body };
+  },
+  sync: async (ctx, info) => {
+    const courseId = requireCourse(ctx, 'syllabus');
+    const body = info.probeData !== undefined ? (info.probeData as string | null) : await fetchSyllabusBody(courseId);
+    const fingerprint = syllabusFingerprint(body);
+    const links = await withTransaction(async (tx) => {
+      await setCourseSyllabus(courseId, body, body ? fingerprint : null, tx);
+      if (!body) return 0;
+      const { links } = htmlToTextWithLinks(body, courseId);
+      await storeContentLinks(courseId, 'syllabus', courseId, links, tx);
+      return links.length;
+    });
+    return { fingerprint, summary: body ? `syllabus (${body.length} chars, ${links} links)` : 'no syllabus' };
+  },
+};
+
+// ---------------------------------------------------------------------------
 // registry
 // ---------------------------------------------------------------------------
 
@@ -603,6 +819,9 @@ export const COLLECTIONS: Record<CollectionKind, CollectionSpec> = {
   planner,
   inbox,
   home,
+  discussions,
+  quizzes,
+  syllabus,
 };
 
 /** Bring one collection up to date according to the freshness policy. */

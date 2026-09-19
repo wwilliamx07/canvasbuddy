@@ -13,6 +13,8 @@ import type {
   ShapedPlannerItem,
   ShapedConversation,
   ShapedMessage,
+  ShapedDiscussion,
+  ShapedQuiz,
 } from '../types/canvas';
 
 function clampLimit(limit: number | undefined, fallback = 25): number {
@@ -72,7 +74,8 @@ export async function exploreGraph(options: {
         (SELECT COUNT(*) FROM assignments a WHERE a.course_id = c.course_id) AS assignment_count,
         (SELECT COUNT(*) FROM files f WHERE f.course_id = c.course_id AND f.total_chunks > 0) AS indexed_document_count,
         ${SCOPE_STATUS_SQL('files')} AS files_status,
-        ${SCOPE_STATUS_SQL('pages')} AS pages_status
+        ${SCOPE_STATUS_SQL('pages')} AS pages_status,
+        (c.syllabus_body IS NOT NULL AND length(c.syllabus_body) > 0) AS has_syllabus
       FROM courses c
       ${conditions.length ? 'WHERE ' + conditions.join(' AND ') : ''}
       ORDER BY c.name ASC
@@ -97,7 +100,8 @@ export async function exploreGraph(options: {
     if (module_id) conditions.push(`mi.module_id = ${add(String(module_id))}`);
     if (course_id) conditions.push(`m.course_id = ${add(String(course_id))}`);
     if (search_term) conditions.push(`mi.title ILIKE ${add(`%${search_term}%`)}`);
-    // `indexed` covers both File items (doc id = file id) and Page items (doc id = page:<course>:<slug>)
+    // `indexed` covers File items (doc id = file id), Page items (page:<course>:<slug>), Assignment
+    // descriptions and Discussion threads (discussion:<id>, present once its replies were read)
     const sql = `
       SELECT mi.item_id, mi.module_id, m.name AS module_name, m.course_id, mi.item_type, mi.title,
         mi.position, mi.content_ref, mi.html_url,
@@ -108,6 +112,7 @@ export async function exploreGraph(options: {
         WHEN mi.item_type = 'File' THEN mi.content_ref
         WHEN mi.item_type = 'Page' THEN 'page:' || m.course_id || ':' || mi.content_ref
         WHEN mi.item_type = 'Assignment' THEN 'assignment:' || mi.content_ref
+        WHEN mi.item_type = 'Discussion' THEN 'discussion:' || mi.content_ref
         ELSE NULL END
       ${conditions.length ? 'WHERE ' + conditions.join(' AND ') : ''}
       ORDER BY m.position ASC, mi.position ASC
@@ -194,12 +199,17 @@ const LINKED_FROM_SQL = `
         WHEN cl.from_type = 'page' THEN 'page: ' || COALESCE(p.title, cl.from_id)
         WHEN cl.from_type = 'assignment' THEN 'assignment: ' || COALESCE(a.name, cl.from_id)
         WHEN cl.from_type = 'announcement' THEN 'announcement: ' || COALESCE(an.title, cl.from_id)
+        WHEN cl.from_type = 'discussion' THEN 'discussion: ' || COALESCE(d.title, cl.from_id)
+        WHEN cl.from_type = 'quiz' THEN 'quiz: ' || COALESCE(qz.title, cl.from_id)
+        WHEN cl.from_type = 'syllabus' THEN 'syllabus'
         ELSE cl.from_type
       END
     FROM content_links cl
     LEFT JOIN pages p ON cl.from_type = 'page' AND p.course_id = cl.course_id AND p.page_url = cl.from_id
     LEFT JOIN assignments a ON cl.from_type = 'assignment' AND a.assignment_id = cl.from_id
     LEFT JOIN announcements an ON cl.from_type = 'announcement' AND an.announcement_id = cl.from_id
+    LEFT JOIN discussions d ON cl.from_type = 'discussion' AND d.discussion_id = cl.from_id
+    LEFT JOIN quizzes qz ON cl.from_type = 'quiz' AND qz.quiz_id = cl.from_id
     WHERE cl.course_id = $1 AND cl.to_type = $3
   ) s GROUP BY s.to_ref`;
 
@@ -256,7 +266,7 @@ export async function listCoursePages(courseId: string, search?: string, limit?:
  */
 export async function storeContentLinks(
   courseId: string,
-  fromType: 'page' | 'assignment' | 'announcement',
+  fromType: 'page' | 'assignment' | 'announcement' | 'discussion' | 'quiz' | 'syllabus',
   fromId: string,
   links: ContentLink[],
   tx?: Queryable
@@ -410,6 +420,77 @@ export async function listAnnouncements(courseId: string, limit: number): Promis
     [String(courseId), clampLimit(limit, 10)]
   );
   return res.rows;
+}
+
+export async function listDiscussions(courseId: string, search: string | undefined, limit: number): Promise<any[]> {
+  const db = await getDB();
+  const res = await db.query(
+    `SELECT d.discussion_id, d.title, d.author, d.posted_at, d.last_reply_at, d.reply_count, d.message, d.html_url,
+       d.pinned, d.locked, d.assignment_id, COALESCE(f.total_chunks, 0) > 0 AS replies_read
+     FROM discussions d
+     LEFT JOIN files f ON f.file_id = 'discussion:' || d.discussion_id
+     WHERE d.course_id = $1 AND ($2::text IS NULL OR d.title ILIKE $2 OR d.message ILIKE $2)
+     ORDER BY d.pinned DESC, COALESCE(d.last_reply_at, d.posted_at) DESC NULLS LAST
+     LIMIT $3`,
+    [String(courseId), search ? `%${search}%` : null, clampLimit(limit, 10)]
+  );
+  return res.rows;
+}
+
+export async function getDiscussionRow(discussionId: string): Promise<any | null> {
+  const db = await getDB();
+  const res = await db.query('SELECT * FROM discussions WHERE discussion_id = $1', [String(discussionId)]);
+  return res.rows[0] || null;
+}
+
+/** Records which last_reply_at the stored reply entries correspond to. */
+export async function setDiscussionRepliesSynced(discussionId: string, version: string | null): Promise<void> {
+  const db = await getDB();
+  await db.query('UPDATE discussions SET replies_synced_for = $2 WHERE discussion_id = $1', [String(discussionId), version]);
+}
+
+export type QuizBucket = 'upcoming' | 'past' | 'undated' | 'all';
+
+export async function listQuizzes(options: {
+  courseId: string;
+  search?: string;
+  bucket?: QuizBucket;
+  includeSubmission?: boolean;
+  limit?: number;
+}): Promise<any[]> {
+  const db = await getDB();
+  const conditions = ['qz.course_id = $1', '($2::text IS NULL OR qz.title ILIKE $2)'];
+  const bucket = options.bucket || 'all';
+  if (bucket === 'upcoming') conditions.push('qz.due_at >= CURRENT_TIMESTAMP');
+  if (bucket === 'past') conditions.push('qz.due_at < CURRENT_TIMESTAMP');
+  if (bucket === 'undated') conditions.push('qz.due_at IS NULL');
+  const submissionCols = options.includeSubmission
+    ? ', s.workflow_state AS submission_state, s.submitted_at, s.score, s.grade, s.late, s.missing, s.excused'
+    : '';
+  const submissionJoin = options.includeSubmission ? 'LEFT JOIN submissions s ON s.assignment_id = qz.assignment_id' : '';
+  const res = await db.query(
+    `SELECT qz.quiz_id, qz.title, qz.quiz_type, qz.time_limit, qz.allowed_attempts, qz.question_count, qz.points_possible,
+       qz.due_at, qz.unlock_at, qz.lock_at, qz.published, qz.description, qz.assignment_id, qz.html_url, qz.lock_explanation
+       ${submissionCols}
+     FROM quizzes qz ${submissionJoin}
+     WHERE ${conditions.join(' AND ')}
+     ORDER BY qz.due_at ASC NULLS LAST, qz.title ASC
+     LIMIT $3`,
+    [String(options.courseId), options.search ? `%${options.search}%` : null, clampLimit(options.limit)]
+  );
+  return res.rows;
+}
+
+/** The Syllabus tab body (raw HTML) and its fingerprint, or null when the course has none. */
+export async function getCourseSyllabus(courseId: string): Promise<{ body: string; version: string } | null> {
+  const db = await getDB();
+  const res = await db.query<{ syllabus_body: string | null; syllabus_version: string | null }>(
+    'SELECT syllabus_body, syllabus_version FROM courses WHERE course_id = $1',
+    [String(courseId)]
+  );
+  const row = res.rows[0];
+  if (!row?.syllabus_body) return null;
+  return { body: row.syllabus_body, version: row.syllabus_version || '1' };
 }
 
 export async function listPlannerItems(start: Date, end: Date): Promise<any[]> {
@@ -817,6 +898,88 @@ export async function upsertAndPruneAnnouncements(
     );
   }
   return { upserted: rows.length, pruned };
+}
+
+export async function upsertAndPruneDiscussions(
+  courseId: string,
+  rows: ShapedDiscussion[],
+  tx?: Queryable
+): Promise<{ upserted: number; pruned: number }> {
+  const db = await q(tx);
+  const ids: string[] = [];
+  for (const d of rows) {
+    ids.push(d.discussion_id);
+    await db.query(
+      `INSERT INTO discussions (discussion_id, course_id, title, author, posted_at, last_reply_at, reply_count, message,
+         html_url, pinned, locked, assignment_id, synced_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, CURRENT_TIMESTAMP)
+       ON CONFLICT (discussion_id) DO UPDATE SET
+         title = EXCLUDED.title, author = EXCLUDED.author, posted_at = EXCLUDED.posted_at,
+         last_reply_at = EXCLUDED.last_reply_at, reply_count = EXCLUDED.reply_count, message = EXCLUDED.message,
+         html_url = EXCLUDED.html_url, pinned = EXCLUDED.pinned, locked = EXCLUDED.locked,
+         assignment_id = EXCLUDED.assignment_id, synced_at = CURRENT_TIMESTAMP`,
+      [d.discussion_id, String(courseId), d.title, d.author, d.posted_at, d.last_reply_at, d.reply_count, d.message,
+        d.html_url, d.pinned, d.locked, d.assignment_id]
+    );
+  }
+  const pruned = await pruneNotIn(db, 'discussions', 'discussion_id', 'course_id = $1', [String(courseId)], ids);
+  if (pruned > 0) {
+    await db.query(
+      `DELETE FROM files WHERE source_type = 'discussion' AND course_id = $1
+         AND substring(file_id from 12) NOT IN (SELECT discussion_id FROM discussions WHERE course_id = $1)`,
+      [String(courseId)]
+    );
+    await db.query(
+      `DELETE FROM content_links WHERE course_id = $1 AND from_type = 'discussion' AND from_id NOT IN (SELECT discussion_id FROM discussions WHERE course_id = $1)`,
+      [String(courseId)]
+    );
+  }
+  return { upserted: rows.length, pruned };
+}
+
+export async function upsertAndPruneQuizzes(
+  courseId: string,
+  rows: ShapedQuiz[],
+  tx?: Queryable
+): Promise<{ upserted: number; pruned: number }> {
+  const db = await q(tx);
+  const ids: string[] = [];
+  for (const z of rows) {
+    ids.push(z.quiz_id);
+    await db.query(
+      `INSERT INTO quizzes (quiz_id, course_id, title, quiz_type, time_limit, allowed_attempts, question_count, points_possible,
+         due_at, unlock_at, lock_at, published, description, assignment_id, html_url, lock_explanation, synced_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, CURRENT_TIMESTAMP)
+       ON CONFLICT (quiz_id) DO UPDATE SET
+         title = EXCLUDED.title, quiz_type = EXCLUDED.quiz_type, time_limit = EXCLUDED.time_limit,
+         allowed_attempts = EXCLUDED.allowed_attempts, question_count = EXCLUDED.question_count,
+         points_possible = EXCLUDED.points_possible, due_at = EXCLUDED.due_at, unlock_at = EXCLUDED.unlock_at,
+         lock_at = EXCLUDED.lock_at, published = EXCLUDED.published, description = EXCLUDED.description,
+         assignment_id = EXCLUDED.assignment_id, html_url = EXCLUDED.html_url, lock_explanation = EXCLUDED.lock_explanation,
+         synced_at = CURRENT_TIMESTAMP`,
+      [z.quiz_id, String(courseId), z.title, z.quiz_type, z.time_limit, z.allowed_attempts, z.question_count, z.points_possible,
+        z.due_at, z.unlock_at, z.lock_at, z.published, z.description, z.assignment_id, z.html_url, z.lock_explanation]
+    );
+  }
+  const pruned = await pruneNotIn(db, 'quizzes', 'quiz_id', 'course_id = $1', [String(courseId)], ids);
+  if (pruned > 0) {
+    await db.query(
+      `DELETE FROM content_links WHERE course_id = $1 AND from_type = 'quiz' AND from_id NOT IN (SELECT quiz_id FROM quizzes WHERE course_id = $1)`,
+      [String(courseId)]
+    );
+  }
+  return { upserted: rows.length, pruned };
+}
+
+/** Stores the Syllabus tab body; NULL when the course has none. The document is indexed from it on demand. */
+export async function setCourseSyllabus(courseId: string, body: string | null, version: string | null, tx?: Queryable): Promise<void> {
+  const db = await q(tx);
+  await db.query('UPDATE courses SET syllabus_body = $2, syllabus_version = $3 WHERE course_id = $1', [String(courseId), body, version]);
+  if (!body) {
+    // A removed syllabus must stop surfacing in search
+    await db.query(`DELETE FROM files WHERE file_id = 'syllabus:' || $1`, [String(courseId)]);
+    await db.query(`DELETE FROM content_links WHERE course_id = $1 AND from_type = 'syllabus'`, [String(courseId)]);
+  }
 }
 
 /** The planner window is replaced wholesale on every sync. */

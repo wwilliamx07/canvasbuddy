@@ -16,7 +16,8 @@ The graph is a **cache of Canvas structure** that makes most agent questions ans
 ## Schema
 
 ```
-courses (course_id PK, name, course_code, term, default_view [what "Home" shows], synced_at,
+courses (course_id PK, name, course_code, term, default_view [what "Home" shows], syllabus_body [raw HTML],
+         syllabus_version [fingerprint], synced_at,
          modules_synced_at, assignments_synced_at, files_synced_at, pages_synced_at)  -- legacy, unused
    │
    ├── course_tabs (PK (course_id, tab_id), label, type internal|external, html_url, position)   -- the nav bar
@@ -28,11 +29,16 @@ courses (course_id PK, name, course_code, term, default_view [what "Home" shows]
    │                description [raw HTML, lazy], description_version [updated_at it was fetched at])
    ├── submissions (assignment_id PK, course_id FK cascade, workflow_state, submitted_at, graded_at,
    │                score, grade, late, missing, excused, synced_at)          -- the student's own
+   ├── discussions (discussion_id PK, course_id FK cascade, title, author, posted_at, last_reply_at, reply_count,
+   │                message [HTML→text], html_url, pinned, locked, assignment_id [graded], replies_synced_for, synced_at)
+   ├── quizzes (quiz_id PK, course_id FK cascade, title, quiz_type, time_limit, allowed_attempts, question_count,
+   │            points_possible, due_at, unlock_at, lock_at, published, description [HTML→text], assignment_id,
+   │            html_url, lock_explanation, synced_at)
    ├── announcements (announcement_id PK, course_id FK cascade, title, posted_at, author,
    │                  text [HTML→text], html_url, synced_at)
    ├── pages (PK (course_id, page_url), title, updated_at, html_url, front_page, synced_at)
    ├── content_links (PK (course_id, from_type, from_id, position), to_type, to_ref, label)
-   │        -- hyperlinks found in HTML bodies: from page/assignment/announcement → file/page/assignment/quiz/discussion/module/external
+   │        -- hyperlinks found in HTML bodies: from page/assignment/announcement/discussion/quiz/syllabus → file/page/assignment/quiz/discussion/module/external
    └── files (file_id PK, course_id FK set-null, filename, display_name, version,
               extracted_at, total_chunks, source_type, embedding_model, html_url, content_type, size)
           └── file_chunks (chunk_id PK, file_id FK cascade, chunk_index, page_number, page_end,
@@ -55,10 +61,12 @@ Key modelling decisions:
 
 - **All ids are `TEXT`.** Canvas ids are numeric but are stringified everywhere (`String(x)`) so the same column can hold page slugs and composite ids.
 - **`module_items.content_ref`** is the pointer into the content tables: a file id for `File` items, a page slug for `Page` items, an assignment/quiz id otherwise. It is the `document_id` that `search_documents` / `read_document` take. `ExternalUrl` / `ExternalTool` items are the exception: `content_ref` holds their destination URL (`external_url`) when Canvas sends one, so the model can send the student there directly.
-- **`files` is the "documents" table**, not just Canvas files. `source_type` is `'file' | 'page' | 'assignment' | 'conversation'` and `file_id` comes from `docIdFor()` in `db/rag.ts` (`<file id>`, `page:<course>:<slug>`, `assignment:<id>`, `conversation:<id>`). A row with `total_chunks = 0` is *known but not indexed*; this is how the `indexed` flag is derived in every query.
-- **Canvas is a link graph, and `content_links` records it.** Every HTML body the app touches (front page, wiki pages at index time, assignment descriptions, announcements at sync time) goes through `ingestHtml` (`canvas/links.ts`): the links are stored as `content_links` rows and what they point at is *registered* — a linked file becomes a `files` row (`total_chunks = 0`, `filename` from the anchor's title, `display_name` from its text), a linked page becomes a `pages` row. That is what makes files a course keeps on its home page (rather than in modules, with the Files area hidden) listable and indexable. Registration never overwrites an existing row; links into *another* course are recorded but its content is not adopted.
+- **`files` is the "documents" table**, not just Canvas files. `source_type` is `'file' | 'page' | 'assignment' | 'conversation' | 'discussion' | 'syllabus'` and `file_id` comes from `docIdFor()` in `db/rag.ts` (`<file id>`, `page:<course>:<slug>`, `assignment:<id>`, `conversation:<id>`, `discussion:<id>`, `syllabus:<course>`). A row with `total_chunks = 0` is *known but not indexed*; this is how the `indexed` flag is derived in every query.
+- **Canvas is a link graph, and `content_links` records it.** Every HTML body the app touches (front page, wiki pages at index time, assignment descriptions, announcements, discussion topics, quiz descriptions and the syllabus at sync time) goes through `ingestHtml` (`canvas/links.ts`): the links are stored as `content_links` rows and what they point at is *registered* — a linked file becomes a `files` row (`total_chunks = 0`, `filename` from the anchor's title, `display_name` from its text), a linked page becomes a `pages` row. That is what makes files a course keeps on its home page (rather than in modules, with the Files area hidden) listable and indexable. Registration never overwrites an existing row; links into *another* course are recorded but its content is not adopted.
 - **The front page is the root.** `courses.default_view` says what "Home" shows; when it is `wiki`, the `home` collection fetches `/front_page`, flags that row in `pages.front_page`, and ingests its links. `list_content(kind="courses")` reports this as `home_view`, and `kind="pages"` lists the front page first.
 - **`assignments.description` is lazy.** The compact `assignment_groups` listing omits it; `get_assignment` / indexing fetch it once and cache it while `description_version = updated_at`. A sync that sees a new `updated_at` nulls it.
+- **Discussion replies are a thread document, like inbox messages.** `discussions` holds the topic list (message as text); the reply tree is fetched on demand (`ensureDiscussionThread`, only when the topic's `last_reply_at` differs from `replies_synced_for`) into the `discussion:<id>` document — chunk 0 is the topic, then one chunk per entry in reading order, keyed by entry id so a re-fetch updates edited entries (dropping their vector), inserts new ones and prunes deleted ones (`upsertDocumentChunksIncremental` with `pruneMissing`). No vector until a semantic search targets the thread.
+- **The syllabus is a document of the course.** `courses.syllabus_body` holds the Syllabus tab HTML (fingerprinted in `syllabus_version`, since Canvas gives it no timestamp); `syllabus:<course>` is indexed from it through the ordinary JIT pipeline. `setCourseSyllabus(null)` drops the document and its links.
 - **`planner_items` and `conversations` have no course FK** because the planner and inbox can reference courses that are not in the graph; `files.course_id` for a conversation is looked up and left NULL if unknown.
 - **`sync_state`** is the single record of when each scope was synced/probed, its probe fingerprint, and whether the course hides it (`unavailable`). Staleness can be judged even when a collection is legitimately empty. The legacy `*_synced_at` columns on `courses` are migrated into it on startup and no longer written.
 - **`graph_edges`** holds `prerequisite` edges between modules and `references` edges from module items to files. It has no foreign keys, so `pruneOrphanEdges` runs after every module/item sync.
@@ -83,6 +91,9 @@ Each collection is a `CollectionSpec` in the registry: a `sync` (full or, given 
 | `announcements` | `/discussion_topics?only_announcements=true` (newest 100) | newest `id:posted_at` | — |
 | `planner` | `/planner/items` for the rolling window (`PLANNER_WINDOW` −7 d…+28 d), replaced wholesale | — (TTL) | — |
 | `inbox` | `/conversations` (newest 200) + `/conversations/:id` for threads | newest `id:last_message_at` | yes: a thread is fetched only when its `last_message_at` differs from `thread_synced_for` (cap 30 per sync); messages are inserted by id as text chunks with a NULL vector. **The sync never embeds** — `embedConversationIfNeeded` embeds a thread's missing vectors the first time `search_documents` targets it. |
+| `discussions` | `/courses/:c/discussion_topics?order_by=recent_activity` (newest 100) | newest topic `id:last_reply_at:posted_at` | — (topics); replies per topic on demand via `/discussion_topics/:id/view` |
+| `quizzes` | `/courses/:c/quizzes` | — (TTL) | — |
+| `syllabus` | `/courses/:c?include[]=syllabus_body` | the body itself, fingerprinted (`length:hash`); the probe's fetch is handed to the sync as `probeData` | stores `courses.syllabus_body`, ingests its links |
 | `home` | `/courses/:c/front_page` (404 = no front page, not "unavailable") | front page `updated_at`; the probe's fetch is handed to the sync as `probeData` | sets `pages.front_page`, ingests the page's links (registers linked files/pages). Ensured by `list_content(kind="files"/"pages")` and the Explorer's course refresh. |
 
 ## Freshness (`canvas/freshness.ts`, `canvas/collections.ts`)
@@ -105,13 +116,13 @@ within TTL, no probe                → fresh
 - **TTLs** are per collection, in minutes, from `settings.freshness` (editable in Settings → Freshness; defaults in `DEFAULT_FRESHNESS`).
 - **Unavailable**: a 403/404 from Canvas (`isUnavailableError`) marks the scope `unavailable` with the error; it is skipped until `unavailableRetry` elapses or the user forces `refresh`. All three probed UofT courses hide Files and Pages, so this is the normal case, not an edge case. One unavailable collection never aborts a multi-collection refresh (`ensureCollections`).
 - **In-flight dedupe**: concurrent calls for the same scope (agent + Graph Explorer) share one promise.
-- **Registry** (`COLLECTIONS` in `collections.ts`): each `CollectionSpec` declares `kind`, `sync(ctx, { state, probeData, settings })` and optionally `probe(ctx, state)`. All ten kinds are registered (see the table above).
+- **Registry** (`COLLECTIONS` in `collections.ts`): each `CollectionSpec` declares `kind`, `sync(ctx, { state, probeData, settings })` and optionally `probe(ctx, state)`. All thirteen kinds are registered (see the table above).
 - **Overview text** (`getGraphOverviewText`) is now just the course roster (names + ids). `exploreGraph('courses')` reports `files_status`/`pages_status` from `sync_state`.
 
 ## Query layer (`db/graph.ts`)
 
 - `exploreGraph({ entity_type, course_id, module_id, search_term, limit, include_items, bucket, include_submission })` builds a parameterized query per entity type. All string filters are `ILIKE '%term%'`; limits are clamped to 1–200 (default 25). Rows are projected to what the model needs (ids, names, dates, positions, `indexed` — computed for File, Page and Assignment items alike). `bucket` filters assignments by due date; `include_submission` joins the student's submission row.
-- Tool-specific reads: `listCourseFiles` / `listCoursePages` (the union described above, with `linked_from` aggregated from module items and `content_links`), `getAssignmentRow`, `listAnnouncements`, `listPlannerItems`, `listConversations` (subject/last-message ILIKE + message FTS, returns `matching_message`), `getConversationMessages`.
+- Tool-specific reads: `listCourseFiles` / `listCoursePages` (the union described above, with `linked_from` aggregated from module items and `content_links`), `getAssignmentRow`, `listAnnouncements`, `listDiscussions` (title/message ILIKE, `replies_read` from the thread document), `getDiscussionRow`, `listQuizzes` (bucket on `due_at`, optional submission join through `assignment_id`), `getCourseSyllabus`, `listPlannerItems`, `listConversations` (subject/last-message ILIKE + message FTS, returns `matching_message`), `getConversationMessages`.
 - Link writes: `storeContentLinks` (replace the links of one source + register targets), `setFrontPage`, `replaceCourseTabs`.
 - `getCourseHierarchy(courseId, includeItems)` returns `{ course, treeNodes, assignments, prerequisites }` for the Graph Explorer. `treeNodes` is a flat list (modules at depth 0, items at depth 1) regrouped client-side; `assignments` is projected (no description).
 - `getGraphStatistics()` — six `COUNT(*)`s for the explorer's ribbon.
