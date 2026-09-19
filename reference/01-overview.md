@@ -7,7 +7,7 @@ An AI study assistant for Canvas LMS, packaged as a Chrome/Edge extension that o
 Design constraints that shape everything:
 
 1. **No backend.** All compute, storage, and API calls happen in the extension page. The user brings their own LLM API key.
-2. **Canvas access rides on the browser session.** No Canvas API token is stored; requests go out with `credentials: 'include'` and succeed because the user is logged into their Canvas in the same browser profile. The Canvas host is chosen at first run (Connect screen) and its origin permission requested then; a deployment profile (`canvas/profiles.ts`, Quercus or generic) names it in the prompt.
+2. **Canvas access rides on the browser session.** No Canvas API token is stored; requests go out with `credentials: 'include'` and succeed because the user is logged into their Canvas in the same browser profile. Known instances (`knownHosts` in `canvas/profiles.ts`, currently `q.utoronto.ca`) are granted in the manifest and connect silently at startup; any other Canvas is connected once through the Connect screen, which requests its origin. A deployment profile (Quercus or generic) names it in the prompt.
 3. **Token economy matters.** Canvas payloads are large and the user pays per token, so the system caches structure locally and instructs the model to read the cache before going live.
 
 ## Runtime environment
@@ -16,7 +16,7 @@ Design constraints that shape everything:
 |---|---|---|
 | Extension format | Manifest V3 | `extension/manifest.json` |
 | Surface | Side panel (`side_panel.default_path = index.html`) | One panel per browser window. The service worker (`src/background.ts`) does nothing except `setPanelBehavior({ openPanelOnActionClick: true })`. |
-| Permissions | `sidePanel`, `activeTab`; `optional_host_permissions: https://*/*` — no fixed host | The Canvas origin is requested at runtime from the Connect screen (`chrome.permissions.request`, a user gesture) and re-checked on every start. `activeTab` lets the panel prefill the host from the tab the icon was clicked on. Persistence uses localStorage and IndexedDB, so no `storage` permission is needed. |
+| Permissions | `sidePanel`, `activeTab`; `host_permissions: https://*.utoronto.ca/*` (the known instances); `optional_host_permissions: https://*/*` | Known instances need no prompt. Any other Canvas origin is requested at runtime from the Connect screen (`chrome.permissions.request`, a user gesture) and re-checked on every start. `activeTab` lets the panel read the host of the tab the icon was clicked on (auto-connect candidate, Connect prefill). Persistence uses localStorage and IndexedDB, so no `storage` permission is needed. |
 | CSP | `script-src 'self' 'wasm-unsafe-eval'` | Required for PGlite's WASM. Inline scripts are blocked. |
 | UI | React 19, TypeScript, Tailwind v4 (`@tailwindcss/postcss`), `lucide-react` icons, `marked` for Markdown, `katex` for math | |
 | Database | `@electric-sql/pglite` + `@electric-sql/pglite-pgvector`, one database per Canvas identity (`idb://<dbName>` from `canvas/identity.ts`) | Postgres compiled to WASM. See `04-knowledge-graph.md`. |

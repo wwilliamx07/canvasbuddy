@@ -8,7 +8,7 @@ import { GraphExplorer } from './components/GraphExplorer/GraphExplorer';
 import { getGraphOverviewText } from './db/graph';
 import { buildSystemPrompt } from './agent/prompt';
 import { Connect } from './components/Connect/Connect';
-import { activateCanvas, hasOriginPermission, releaseOriginPermission } from './canvas/connection';
+import { activateCanvas, hasOriginPermission, releaseOriginPermission, findConnectableHost } from './canvas/connection';
 import { resolveIdentity, memorySlotFor, forgetMemory, type MemorySlot } from './canvas/identity';
 import { onSessionLost } from './canvas/http';
 import { configureDatabase, closeDB } from './db/pglite';
@@ -608,6 +608,9 @@ function App() {
   const [connection, setConnection] = useState<Connection>({ status: 'checking' });
   const [notice, setNotice] = useState<string | null>(null);
   const [connectNonce, setConnectNonce] = useState(0); // bumps on Connect so the same host re-resolves
+  // Known instances are granted in the manifest, so Disconnect cannot release them; it just stops
+  // auto-connecting for this session so the user can pick another Canvas.
+  const autoConnectRef = useRef(true);
   // Chats live under the connected identity's key (canvas/identity.ts), known only once connected
   const chatsKeyRef = useRef<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
@@ -653,14 +656,26 @@ function App() {
   useEffect(() => {
     if (!settingsLoaded) return;
     const host = settings.canvasHost;
+    let cancelled = false;
     if (!host) {
       chatsKeyRef.current = null;
       setChats([]);
       loadChatIntoView(null);
-      setConnection({ status: 'disconnected' });
-      return;
+      if (!autoConnectRef.current) {
+        setConnection({ status: 'disconnected' });
+        return;
+      }
+      // No remembered host: connect silently to the tab's Canvas or a known instance if possible
+      setConnection({ status: 'checking' });
+      findConnectableHost().then(({ host: found, tabHost }) => {
+        if (cancelled) return;
+        if (found) setCanvasHost(found);
+        else setConnection({ status: 'disconnected', host: tabHost ?? undefined });
+      });
+      return () => {
+        cancelled = true;
+      };
     }
-    let cancelled = false;
     setConnection({ status: 'checking', host });
     (async () => {
       if (!(await hasOriginPermission(host))) return { status: 'disconnected', host } as Connection;
@@ -711,9 +726,18 @@ function App() {
     return () => onSessionLost(null);
   }, [connection]);
 
+  const setCanvasHost = (host: string) => {
+    setSettings((prev) => {
+      const next = { ...prev, canvasHost: host };
+      localStorage.setItem(SETTINGS_KEY, JSON.stringify(next));
+      return next;
+    });
+  };
+
   const handleConnected = (host: string) => {
     // The effect above resolves the identity and opens its memory
-    handleSettingsChange({ ...settings, canvasHost: host });
+    autoConnectRef.current = true;
+    setCanvasHost(host);
     setConnectNonce((n) => n + 1);
   };
 
@@ -728,7 +752,8 @@ function App() {
 
   const handleDisconnect = () => {
     if (connection.status === 'connected') void releaseOriginPermission(connection.host);
-    handleSettingsChange({ ...settings, canvasHost: '' });
+    autoConnectRef.current = false;
+    setCanvasHost('');
   };
 
   // Fixed for the session, so the prompt + tool schemas stay a cacheable prefix

@@ -151,9 +151,9 @@ export const Settings: React.FC<SettingsProps> = ({
                 <button
                   onClick={onDisconnect}
                   className="px-3 py-1.5 text-xs bg-gray-200 hover:bg-gray-300 text-gray-800 rounded-lg font-medium transition-colors whitespace-nowrap"
-                  title="Release this site's permission; memory is kept"
+                  title="Connect to a different Canvas; memory is kept"
                 >
-                  Disconnect
+                  Switch Canvas
                 </button>
               )}
             </div>

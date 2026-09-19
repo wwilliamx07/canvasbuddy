@@ -1,10 +1,11 @@
 import { configureCanvas } from './http';
-import { profileFor, type CanvasProfile } from './profiles';
+import { profileFor, KNOWN_HOSTS, type CanvasProfile } from './profiles';
 
 /**
- * Connecting the panel to a Canvas deployment. The manifest grants no host by default; the
- * origin is requested at runtime (a user gesture) and remembered in `settings.canvasHost`. Chrome
- * can revoke optional permissions, so the check runs on every start.
+ * Connecting the panel to a Canvas deployment. Known instances (`profiles.ts`) are granted in the
+ * manifest and connect silently; any other origin is requested at runtime (a user gesture) from
+ * the Connect screen. The host is remembered in `settings.canvasHost`. Chrome can revoke optional
+ * permissions, so the check runs on every start.
  */
 
 export interface ConnectionCheck {
@@ -63,6 +64,21 @@ export async function verifyCanvasSession(host: string): Promise<ConnectionCheck
 export function activateCanvas(host: string): CanvasProfile {
   configureCanvas(host);
   return profileFor(host);
+}
+
+/**
+ * A Canvas to connect to without asking: the tab the panel was opened on, then the known
+ * instances — the first that already has permission and a live session. Null means the Connect
+ * screen has to ask.
+ */
+export async function findConnectableHost(): Promise<{ host: string | null; tabHost: string | null }> {
+  const tabHost = await activeTabHost();
+  const candidates = [...new Set([tabHost, ...KNOWN_HOSTS].filter((h): h is string => Boolean(h)))];
+  for (const host of candidates) {
+    if (!(await hasOriginPermission(host))) continue;
+    if ((await verifyCanvasSession(host)).ok) return { host, tabHost };
+  }
+  return { host: null, tabHost };
 }
 
 /** Host of the tab the panel was opened on, when Chrome lets us see it (activeTab after an action click). */

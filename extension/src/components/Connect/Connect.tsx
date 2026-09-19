@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { Link2, AlertCircle } from 'lucide-react';
 import { activeTabHost, requestOriginPermission, verifyCanvasSession } from '../../canvas/connection';
-import { normalizeHost, profileFor } from '../../canvas/profiles';
+import { normalizeHost, profileFor, KNOWN_HOSTS } from '../../canvas/profiles';
 
 interface ConnectProps {
   /** Host to prefill (a previous connection whose permission is gone), if any. */
@@ -21,11 +21,11 @@ export const Connect: React.FC<ConnectProps> = ({ initialHost, initialError, onC
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(initialError || null);
 
-  // Prefill from the tab the panel was opened on
+  // Prefill from the tab the panel was opened on, else the first known instance
   useEffect(() => {
     if (initialHost) return;
     activeTabHost().then((h) => {
-      if (h) setHostInput(h);
+      setHostInput(h || KNOWN_HOSTS[0] || '');
     });
   }, [initialHost]);
 

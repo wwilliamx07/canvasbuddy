@@ -46,6 +46,6 @@ npm install
 npm run build
 ```
 
-Then load `extension/dist` as an unpacked extension (chrome://extensions → Developer mode → Load unpacked), open your Canvas site in a tab and sign in, click the toolbar icon to open the side panel, and press **Connect** (the host is prefilled from the tab; Chrome asks once for permission to that site). Enter your Gemini or OpenAI key in **Settings**.
+Then load `extension/dist` as an unpacked extension (chrome://extensions → Developer mode → Load unpacked), open your Canvas site in a tab and sign in, and click the toolbar icon to open the side panel. Quercus connects automatically; another Canvas shows a **Connect** screen once (the host is prefilled from the tab; Chrome asks for permission to that site). Enter your Gemini or OpenAI key in **Settings**.
 
 Type-check with `npx tsc -p tsconfig.app.json --noEmit` from `extension/`.
