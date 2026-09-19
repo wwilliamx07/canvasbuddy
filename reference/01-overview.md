@@ -16,7 +16,7 @@ Design constraints that shape everything:
 |---|---|---|
 | Extension format | Manifest V3 | `extension/manifest.json` |
 | Surface | Side panel (`side_panel.default_path = index.html`) | One panel per browser window. The service worker (`src/background.ts`) does nothing except `setPanelBehavior({ openPanelOnActionClick: true })`. |
-| Permissions | `sidePanel`, `activeTab`; `host_permissions: https://*.utoronto.ca/*` (the known instances); `optional_host_permissions: https://*/*` | Known instances need no prompt. Any other Canvas origin is requested at runtime from the Connect screen (`chrome.permissions.request`, a user gesture) and re-checked on every start. `activeTab` lets the panel read the host of the tab the icon was clicked on (auto-connect candidate, Connect prefill). Persistence uses localStorage and IndexedDB, so no `storage` permission is needed. |
+| Permissions | `sidePanel`, `activeTab`, `scripting`; `host_permissions: https://*.utoronto.ca/*` (the known instances); `optional_host_permissions: https://*/*` | Known instances need no prompt. Any other Canvas origin is requested at runtime from the Connect screen (`chrome.permissions.request`, a user gesture) and re-checked on every start. `activeTab` lets the panel read the host of the tab the icon was clicked on and, with `scripting`, run a one-line Canvas signature check in that page before asking for its origin. Persistence uses localStorage and IndexedDB, so no `storage` permission is needed. |
 | CSP | `script-src 'self' 'wasm-unsafe-eval'` | Required for PGlite's WASM. Inline scripts are blocked. |
 | UI | React 19, TypeScript, Tailwind v4 (`@tailwindcss/postcss`), `lucide-react` icons, `marked` for Markdown, `katex` for math | |
 | Database | `@electric-sql/pglite` + `@electric-sql/pglite-pgvector`, one database per Canvas identity (`idb://<dbName>` from `canvas/identity.ts`) | Postgres compiled to WASM. See `04-knowledge-graph.md`. |
@@ -46,7 +46,7 @@ canvasbuddy/
         │   ├── ChatUI/        ← message list + input
         │   ├── Navigation/    ← left rail: tabs + chat list
         │   ├── Settings/      ← provider/key/model/threshold form; exports AppSettings; connected-Canvas row
-        │   ├── Connect/       ← first-run screen: host field → permission request → session check
+        │   ├── Connect/       ← first-run screen: inspect the current tab → "Grant access to <host>" → session check
         │   └── GraphExplorer/ ← knowledge-graph browser, sync + index buttons
         ├── settings.ts        ← DEFAULT_SETTINGS + normalizeSettings (merges old persisted settings), resolveBaseUrl
         ├── canvas/

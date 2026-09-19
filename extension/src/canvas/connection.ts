@@ -12,6 +12,8 @@ export interface ConnectionCheck {
   ok: boolean;
   /** Why not: permission missing, not signed in, unreachable. */
   reason?: string;
+  /** The host answered, but not like Canvas — a granted permission should be released. */
+  notCanvas?: boolean;
 }
 
 export async function hasOriginPermission(host: string): Promise<boolean> {
@@ -50,14 +52,65 @@ export async function verifyCanvasSession(host: string): Promise<ConnectionCheck
   if (response.status === 401 || (response.ok && !isJson)) {
     return { ok: false, reason: `Not signed in to ${host}. Open it in a tab, sign in, then try again.` };
   }
+  if (response.status === 404 || (!response.ok && !isJson)) {
+    return { ok: false, notCanvas: true, reason: `${host} does not look like a Canvas site.` };
+  }
   if (!response.ok) return { ok: false, reason: `${host} answered ${response.status} ${response.statusText}.` };
   try {
     const self = await response.json();
-    if (!self?.id) return { ok: false, reason: `${host} does not look like a Canvas site.` };
+    if (!self?.id) return { ok: false, notCanvas: true, reason: `${host} does not look like a Canvas site.` };
   } catch {
-    return { ok: false, reason: `${host} does not look like a Canvas site.` };
+    return { ok: false, notCanvas: true, reason: `${host} does not look like a Canvas site.` };
   }
   return { ok: true };
+}
+
+export interface TabInspection {
+  /** Host of the active tab, when it is an https page whose URL the panel may see. */
+  host: string | null;
+  /** Whether the page is Canvas; null when the page could not be inspected. */
+  isCanvas: boolean | null;
+}
+
+/**
+ * Looks at the active tab before asking for anything: its host, and whether the page is Canvas.
+ * Canvas LMS exposes a global `ENV` (current user, root account) on every page and wraps the app
+ * in `#application.ic-app`, so both are checked in the page's main world. Inspecting needs the
+ * `activeTab` grant that clicking the action gives for that tab; when it is missing (the panel was
+ * open while the user switched tabs) the result is `isCanvas: null` and the caller verifies
+ * through the API after the permission request instead.
+ */
+export async function inspectActiveTab(): Promise<TabInspection> {
+  let tab: chrome.tabs.Tab | undefined;
+  try {
+    [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  } catch {
+    return { host: null, isCanvas: null };
+  }
+  if (!tab?.url || tab.id === undefined) return { host: null, isCanvas: null };
+  let host: string;
+  try {
+    const url = new URL(tab.url);
+    if (url.protocol !== 'https:') return { host: null, isCanvas: null };
+    host = url.hostname;
+  } catch {
+    return { host: null, isCanvas: null };
+  }
+  try {
+    const [result] = await chrome.scripting.executeScript({ target: { tabId: tab.id }, world: 'MAIN', func: looksLikeCanvasPage });
+    return { host, isCanvas: Boolean(result?.result) };
+  } catch {
+    return { host, isCanvas: null };
+  }
+}
+
+// Serialized into the page, so it must be self-contained: no references to this module.
+function looksLikeCanvasPage(): boolean {
+  const env = (window as any).ENV;
+  const envHit =
+    !!env && typeof env === 'object' && ('current_user_id' in env || 'DOMAIN_ROOT_ACCOUNT_ID' in env || 'ACCOUNT_ID' in env);
+  const domHit = !!document.querySelector('#application.ic-app, .ic-app-header, .ic-Login, #global_nav_tray_container');
+  return envHit || domHit;
 }
 
 /** Points every Canvas request at this host and returns its profile. */

@@ -55,15 +55,3 @@ export const KNOWN_HOSTS: string[] = PROFILES.flatMap((p) => p.knownHosts);
 export function profileFor(host: string): CanvasProfile {
   return PROFILES.find((p) => p.matches(host)) ?? GENERIC;
 }
-
-/** "q.utoronto.ca" from whatever the user typed or the tab reported. */
-export function normalizeHost(input: string): string | null {
-  const trimmed = input.trim();
-  if (!trimmed) return null;
-  try {
-    const url = new URL(/^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`);
-    return url.hostname.toLowerCase() || null;
-  } catch {
-    return null;
-  }
-}

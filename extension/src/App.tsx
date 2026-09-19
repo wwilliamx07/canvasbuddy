@@ -1128,7 +1128,7 @@ function App() {
             {connection.host ? `Connecting to ${connection.host}…` : 'Loading…'}
           </div>
         ) : connection.status === 'disconnected' ? (
-          <Connect initialHost={connection.host} initialError={connection.reason} onConnected={handleConnected} />
+          <Connect initialError={connection.reason} onConnected={handleConnected} />
         ) : activeTab === 'chat' ? (
           <ChatUI
             messages={messages}

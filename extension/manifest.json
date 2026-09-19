@@ -23,7 +23,7 @@
     "48": "logo128.png",
     "128": "logo128.png"
   },
-  "permissions": ["sidePanel", "activeTab"],
+  "permissions": ["sidePanel", "activeTab", "scripting"],
   "host_permissions": [
     "https://*.utoronto.ca/*"
   ],
