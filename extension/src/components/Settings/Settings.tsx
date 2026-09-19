@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { Eye, EyeOff } from 'lucide-react';
 import { DEFAULT_FRESHNESS, type FreshnessSettings } from '../../canvas/freshness';
+import { DEFAULT_BASE_URLS } from '../../settings';
 
 export interface AppSettings {
   apiKey: string;
@@ -162,10 +163,10 @@ export const Settings: React.FC<SettingsProps> = ({ settings, onSettingsChange, 
             value={form.baseUrl}
             onChange={(e) => handleChange('baseUrl', e.target.value)}
             className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-200"
-            placeholder="https://example.com/api"
+            placeholder={DEFAULT_BASE_URLS[form.llmProvider]}
           />
           <p className="text-xs text-gray-500 mt-1">
-            The base URL for your LLM API endpoint
+            Leave empty for the provider default shown above; set it for OpenAI-compatible endpoints
           </p>
         </div>
 

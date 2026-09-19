@@ -49,13 +49,13 @@ Notes:
 `callLLM(messages, settings, includeTools)` dispatches on `settings.llmProvider`.
 
 ### OpenAI (`toOpenAIMessages`, `toOpenAITools`)
-- Endpoint: `${baseUrl}/chat/completions`, Bearer auth.
+- Endpoint: `${resolveBaseUrl(settings)}/chat/completions`, Bearer auth. `resolveBaseUrl` (`src/settings.ts`) returns the user's `baseUrl` or the provider default in `DEFAULT_BASE_URLS` (`https://api.openai.com/v1`).
 - Tool schemas are converted from the Google-style `TOOL_CONFIG` (uppercase types) to JSON-Schema function tools.
 - History mapping: assistant turns with `toolCalls` → `tool_calls[]`; `toolResults` → one `role: 'tool'` message per result keyed by `tool_call_id`; digests → mid-conversation `system` messages.
 - `max_completion_tokens: 2000`. Errors include the provider's message body (`readApiError`).
 
 ### Google Gemini (`toGeminiRequest`)
-- Endpoint: `generativelanguage.googleapis.com/v1beta/models/{model}:generateContent` (key in the `x-goog-api-key` header).
+- Endpoint: `${resolveBaseUrl(settings)}/models/{model}:generateContent` (default root `https://generativelanguage.googleapis.com/v1beta`; key in the `x-goog-api-key` header).
 - All `system` messages (prompt + digests) are concatenated into `systemInstruction`; ordering relative to user turns is lost, which is acceptable because digests are memory, not dialogue. Parts flagged `thought` are excluded from the visible text.
 - `toolResults` → a `user` content with `functionResponse` parts; `toolCalls` → `model` content with `functionCall` parts.
 - **Thought signatures.** Gemini 3 attaches an opaque `thoughtSignature` to function-call parts (and sometimes text parts) and requires it to be echoed back verbatim when the turn is replayed. The loop captures them on `ToolCall.thoughtSignature` / `ConversationMessage.thoughtSignature`. If a replayed model turn has no signature on any call (e.g. after a provider switch), the first call gets the documented placeholder `skip_thought_signature_validator`.

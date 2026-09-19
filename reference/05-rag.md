@@ -50,7 +50,8 @@ Points worth knowing:
 
 - Always 768 dimensions (`outputDimensionality` / `dimensions`) to match `VECTOR(768)` in the schema.
 - Google: `:batchEmbedContents` in batches of 20, with `taskType` `RETRIEVAL_DOCUMENT` for chunks and `RETRIEVAL_QUERY` for questions (asymmetric retrieval improves ranking).
-- OpenAI: `/embeddings` in batches of 50, results re-sorted by `index`. Honours `settings.baseUrl` for compatible providers.
+- OpenAI: `/embeddings` in batches of 50, results re-sorted by `index`.
+- Both build their URL from `resolveBaseUrl(settings)` (`src/settings.ts`): the user's `baseUrl`, or the provider default when it is empty, so OpenAI-compatible endpoints work for embeddings too.
 - Uses the same API key and provider as chat; there is no separate embedding credential.
 
 ## Storage (`db/rag.ts`)

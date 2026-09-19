@@ -1,4 +1,5 @@
 import type { AppSettings } from '../components/Settings/Settings';
+import { resolveBaseUrl } from '../settings';
 
 /**
  * Retrieval is asymmetric: chunks are embedded as documents, questions as queries.
@@ -43,9 +44,9 @@ export async function batchEmbed(
   const embeddingModel = resolveEmbeddingModel(settings).split('/').slice(1).join('/');
 
   if (provider === 'google') {
-    return batchEmbedGoogle(texts, embeddingModel, settings.apiKey, task);
+    return batchEmbedGoogle(texts, embeddingModel, settings.apiKey, task, resolveBaseUrl(settings));
   } else if (provider === 'openai') {
-    return batchEmbedOpenAI(texts, embeddingModel, settings.apiKey, settings.baseUrl);
+    return batchEmbedOpenAI(texts, embeddingModel, settings.apiKey, resolveBaseUrl(settings));
   } else {
     throw new Error(`Unsupported LLM provider for embeddings: ${provider}`);
   }
@@ -54,7 +55,7 @@ export async function batchEmbed(
 /**
  * Google AI Studio embeddings (defaulting to gemini-embedding-2, 768 dimensions)
  */
-async function batchEmbedGoogle(texts: string[], model: string, apiKey: string, task: EmbeddingTask): Promise<number[][]> {
+async function batchEmbedGoogle(texts: string[], model: string, apiKey: string, task: EmbeddingTask, baseUrl: string): Promise<number[][]> {
   const taskType = task === 'query' ? 'RETRIEVAL_QUERY' : 'RETRIEVAL_DOCUMENT';
   // Process in chunks of 20 to stay well within Google API limits
   const CHUNK_SIZE = 20;
@@ -76,7 +77,7 @@ async function batchEmbedGoogle(texts: string[], model: string, apiKey: string, 
     };
 
     const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${cleanModel}:batchEmbedContents?key=${apiKey}`,
+      `${baseUrl}/models/${cleanModel}:batchEmbedContents?key=${apiKey}`,
       {
         method: 'POST',
         headers: {
@@ -114,11 +115,11 @@ async function batchEmbedOpenAI(
   texts: string[],
   model: string,
   apiKey: string,
-  baseUrl?: string
+  baseUrl: string
 ): Promise<number[][]> {
   const CHUNK_SIZE = 50;
   const allEmbeddings: number[][] = [];
-  const endpoint = baseUrl ? `${baseUrl.replace(/\/+$/, '')}/embeddings` : 'https://api.openai.com/v1/embeddings';
+  const endpoint = `${baseUrl}/embeddings`;
 
   for (let i = 0; i < texts.length; i += CHUNK_SIZE) {
     const slice = texts.slice(i, i + CHUNK_SIZE);

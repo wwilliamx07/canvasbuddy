@@ -3,7 +3,7 @@ import { Navigation } from './components/Navigation/Navigation';
 import { ChatUI } from './components/ChatUI/ChatUI';
 import type { Message } from './components/ChatUI/ChatUI';
 import { Settings, type AppSettings } from './components/Settings/Settings';
-import { normalizeSettings } from './settings';
+import { normalizeSettings, resolveBaseUrl } from './settings';
 import { GraphExplorer } from './components/GraphExplorer/GraphExplorer';
 import { getGraphOverviewText } from './db/graph';
 import { SYSTEM_PROMPT } from './agent/prompt';
@@ -540,7 +540,7 @@ function App() {
     includeTools: boolean = true
   ): Promise<{ text: string; rawResponse: any }> => {
     if (settings.llmProvider === 'openai') {
-      const response = await fetch(`${settings.baseUrl}/chat/completions`, {
+      const response = await fetch(`${resolveBaseUrl(settings)}/chat/completions`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -570,7 +570,7 @@ function App() {
       }
 
       const response = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/${settings.model}:generateContent`,
+        `${resolveBaseUrl(settings)}/models/${settings.model}:generateContent`,
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', 'x-goog-api-key': settings.apiKey },
