@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { Navigation } from './components/Navigation/Navigation';
 import { ChatUI } from './components/ChatUI/ChatUI';
 import type { Message } from './components/ChatUI/ChatUI';
@@ -239,6 +239,138 @@ function extractTextContent(responseData: any): string {
   return output;
 }
 
+// ---------------------------------------------------------------------------
+// Streaming
+// ---------------------------------------------------------------------------
+
+/**
+ * Yields the `data:` payload of each server-sent event. Both providers stream this way; the
+ * caller decides what a payload means. Events are separated by a blank line and may use CRLF.
+ */
+async function* readSSE(response: Response): AsyncGenerator<string> {
+  if (!response.body) throw new Error('The provider returned no response body to stream.');
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+
+  const dataOf = (event: string): string =>
+    event
+      .split(/\r?\n/)
+      .filter((line) => line.startsWith('data:'))
+      .map((line) => line.slice(5).trimStart())
+      .join('\n');
+
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let match: RegExpExecArray | null;
+      while ((match = /\r?\n\r?\n/.exec(buffer))) {
+        const data = dataOf(buffer.slice(0, match.index));
+        buffer = buffer.slice(match.index + match[0].length);
+        if (data) yield data;
+      }
+    }
+    buffer += decoder.decode();
+    const tail = dataOf(buffer);
+    if (tail) yield tail;
+  } finally {
+    // Leaving early (`[DONE]`, an error) must close the connection, not just drop the lock
+    reader.cancel().catch(() => {});
+  }
+}
+
+function parseSSEJson(data: string): any {
+  try {
+    return JSON.parse(data);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * OpenAI stream → the non-streaming response shape. Text deltas go to `onDelta`; tool calls
+ * arrive as fragments keyed by `index` (id and name first, then argument pieces) and are joined.
+ */
+async function readOpenAIStream(response: Response, onDelta: (text: string) => void): Promise<any> {
+  let content = '';
+  let finishReason: string | undefined;
+  const toolCalls: Array<{ id: string; type: 'function'; function: { name: string; arguments: string } }> = [];
+
+  for await (const data of readSSE(response)) {
+    if (data === '[DONE]') break;
+    const chunk = parseSSEJson(data);
+    if (!chunk) continue;
+    if (chunk.error) throw new Error(chunk.error.message || JSON.stringify(chunk.error));
+    const choice = chunk.choices?.[0];
+    if (!choice) continue;
+    if (choice.finish_reason) finishReason = choice.finish_reason;
+    const delta = choice.delta || {};
+    if (typeof delta.content === 'string' && delta.content) {
+      content += delta.content;
+      onDelta(delta.content);
+    }
+    for (const fragment of delta.tool_calls || []) {
+      const index = typeof fragment.index === 'number' ? fragment.index : toolCalls.length;
+      const call = (toolCalls[index] ||= { id: '', type: 'function', function: { name: '', arguments: '' } });
+      if (fragment.id) call.id = fragment.id;
+      if (fragment.function?.name) call.function.name += fragment.function.name;
+      if (fragment.function?.arguments) call.function.arguments += fragment.function.arguments;
+    }
+  }
+
+  const tool_calls = toolCalls.filter(Boolean).map((c, i) => ({ ...c, id: c.id || `call_${i}` }));
+  return {
+    choices: [{ index: 0, finish_reason: finishReason, message: { role: 'assistant', content, ...(tool_calls.length ? { tool_calls } : {}) } }],
+  };
+}
+
+/**
+ * Gemini stream → the non-streaming response shape. Visible text parts are concatenated into one
+ * part; a thought signature seen on any text part (Gemini sends it on the last chunk, sometimes
+ * with empty text) is carried on that merged part, and function-call parts keep their own, so
+ * `parseFunctionCalls` / `extractTextThoughtSignature` and the signature replay work unchanged.
+ */
+async function readGeminiStream(response: Response, onDelta: (text: string) => void): Promise<any> {
+  const parts: any[] = [];
+  let textPart: any = null;
+  let finishReason: string | undefined;
+  let promptFeedback: any;
+
+  for await (const data of readSSE(response)) {
+    const chunk = parseSSEJson(data);
+    if (!chunk) continue;
+    if (chunk.error) throw new Error(chunk.error.message || JSON.stringify(chunk.error));
+    if (chunk.promptFeedback) promptFeedback = chunk.promptFeedback;
+    const candidate = chunk.candidates?.[0];
+    if (!candidate) continue;
+    if (candidate.finishReason) finishReason = candidate.finishReason;
+    for (const part of candidate.content?.parts || []) {
+      if (typeof part.text === 'string' && !part.thought) {
+        if (!textPart) {
+          textPart = { text: '' };
+          parts.push(textPart);
+        }
+        textPart.text += part.text;
+        if (part.thoughtSignature) textPart.thoughtSignature = part.thoughtSignature;
+        if (part.text) onDelta(part.text);
+      } else {
+        parts.push(part);
+      }
+    }
+  }
+
+  return {
+    candidates: [{ index: 0, content: { role: 'model', parts }, ...(finishReason ? { finishReason } : {}) }],
+    ...(promptFeedback ? { promptFeedback } : {}),
+  };
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof DOMException ? error.name === 'AbortError' : (error as any)?.name === 'AbortError';
+}
+
 /** The provider's real error message, not just the HTTP status line. */
 async function readApiError(response: Response): Promise<string> {
   let detail = '';
@@ -344,10 +476,17 @@ function takeMessagesByTokenBudget(messages: ConversationMessage[], tokenBudget:
   return selected;
 }
 
+interface CallOptions {
+  includeTools?: boolean;       // default true
+  onDelta?: (text: string) => void; // when set, the provider's streaming endpoint is used
+  signal?: AbortSignal;
+}
+type CallLLM = (messages: ConversationMessage[], settings: AppSettings, options?: CallOptions) => Promise<{ text: string; rawResponse: any }>;
+
 async function generateDigestText(
   transcript: ConversationMessage[],
   settings: AppSettings,
-  callLLMFn: (messages: ConversationMessage[], settings: AppSettings, includeTools?: boolean) => Promise<{ text: string; rawResponse: any }>
+  callLLMFn: CallLLM
 ): Promise<string> {
   const prompt =
     'Summarize this conversation segment into a compact persistent memory digest. Preserve durable facts (course ids, assignment/file names and ids, due dates, grades), decisions, user preferences, and unresolved tasks. Do not repeat raw text or tool payloads.';
@@ -371,7 +510,7 @@ async function generateDigestText(
       { role: 'user', content: prompt },
     ],
     settings,
-    false
+    { includeTools: false }
   );
 
   return response.text.trim();
@@ -417,6 +556,29 @@ function chatTitleFor(content: string): string {
   return firstLine.length > 48 ? firstLine.slice(0, 47) + '…' : firstLine || 'New chat';
 }
 
+/** One line of tool activity for the chat bubble, from the call the model made. */
+function describeToolCall(name: string, args: Record<string, any>): string {
+  const q = (s: unknown) => (typeof s === 'string' && s.trim() ? ` "${s.trim()}"` : '');
+  switch (name) {
+    case 'list_content':
+      return `Listing ${args.kind || 'content'}${q(args.search)}`;
+    case 'get_assignment':
+      return 'Reading an assignment';
+    case 'search_documents':
+      return `Searching ${args.document_id ? 'the document' : 'documents'} for${q(args.query)}`;
+    case 'read_document':
+      return `Reading ${args.document_type || 'document'}${args.pages ? ` pages ${args.pages}` : ''}`;
+    case 'get_announcements':
+      return 'Checking announcements';
+    case 'get_planner':
+      return 'Checking the planner';
+    case 'get_inbox':
+      return `Checking the inbox${q(args.search)}`;
+    default:
+      return `Running ${name}`;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // App
 // ---------------------------------------------------------------------------
@@ -431,6 +593,7 @@ function App() {
   const [isLoading, setIsLoading] = useState(false);
   const [currentContextTokens, setCurrentContextTokens] = useState(0);
   const [settings, setSettings] = useState<AppSettings>(() => normalizeSettings(null));
+  const abortRef = useRef<AbortController | null>(null);
 
   const loadChatIntoView = (chat: Chat | null) => {
     setCurrentChatId(chat?.id ?? null);
@@ -476,7 +639,7 @@ function App() {
               title: chat.title.startsWith('Chat ') || chat.title === 'New chat'
                 ? chatTitleFor(msgs.find((m) => m.role === 'user')?.content || chat.title)
                 : chat.title,
-              messages: msgs,
+              messages: msgs.map(({ streaming: _streaming, ...m }) => m),
               apiHistory: history,
               contextDigests: digests,
               updatedAt: new Date(),
@@ -534,11 +697,9 @@ function App() {
     setCurrentContextTokens(estimateConversationTokens(buildApiHistory(apiHistory, contextDigests)));
   }, [apiHistory, contextDigests, currentChatId, settings.contextThreshold]);
 
-  const callLLM = async (
-    history: ConversationMessage[],
-    settings: AppSettings,
-    includeTools: boolean = true
-  ): Promise<{ text: string; rawResponse: any }> => {
+  const callLLM: CallLLM = async (history, settings, options = {}) => {
+    const { includeTools = true, onDelta, signal } = options;
+
     if (settings.llmProvider === 'openai') {
       const response = await fetch(`${resolveBaseUrl(settings)}/chat/completions`, {
         method: 'POST',
@@ -551,10 +712,12 @@ function App() {
           messages: toOpenAIMessages(history),
           max_completion_tokens: 2000,
           ...(includeTools && TOOL_CONFIG.length > 0 ? { tools: toOpenAITools(TOOL_CONFIG) } : {}),
+          ...(onDelta ? { stream: true } : {}),
         }),
+        signal,
       });
       if (!response.ok) throw new Error(await readApiError(response));
-      const data = await response.json();
+      const data = onDelta ? await readOpenAIStream(response, onDelta) : await response.json();
       return { text: data.choices?.[0]?.message?.content || '', rawResponse: data };
     }
 
@@ -569,16 +732,18 @@ function App() {
         requestBody.tools = [{ functionDeclarations: TOOL_CONFIG }];
       }
 
+      const method = onDelta ? 'streamGenerateContent?alt=sse' : 'generateContent';
       const response = await fetch(
-        `${resolveBaseUrl(settings)}/models/${settings.model}:generateContent`,
+        `${resolveBaseUrl(settings)}/models/${settings.model}:${method}`,
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', 'x-goog-api-key': settings.apiKey },
           body: JSON.stringify(requestBody),
+          signal,
         }
       );
       if (!response.ok) throw new Error(await readApiError(response));
-      const data = await response.json();
+      const data = onDelta ? await readGeminiStream(response, onDelta) : await response.json();
       const text = extractTextContent(data);
       const finishReason = data?.candidates?.[0]?.finishReason;
       const blocked = data?.promptFeedback?.blockReason;
@@ -627,6 +792,8 @@ function App() {
     return nextDigests;
   };
 
+  const handleStop = () => abortRef.current?.abort();
+
   const handleSendMessage = async (content: string) => {
     const hadActiveChat = Boolean(currentChatId);
     const activeChatId = hadActiveChat ? currentChatId! : createNewChat();
@@ -642,6 +809,22 @@ function App() {
     setMessages(currentMessages);
     setApiHistory(currentHistory);
     setIsLoading(true);
+
+    const abort = new AbortController();
+    abortRef.current = abort;
+    const { signal } = abort;
+
+    // Text of the model turn in flight, kept until that turn is appended to the history so an
+    // interrupted turn can still be shown (and remembered) as far as it got.
+    let partialText = '';
+    let bubbleId: string | null = null;
+    let paintHandle = 0;
+    const paintPartial = () => {
+      paintHandle = 0;
+      const id = bubbleId;
+      const text = partialText;
+      if (id) setMessages((prev) => prev.map((m) => (m.id === id ? { ...m, content: text } : m)));
+    };
 
     try {
       currentDigests = await ensureContextWithinThreshold(currentHistory, currentDigests);
@@ -660,16 +843,33 @@ function App() {
         if (toolRounds >= MAX_TOOL_ROUNDS) {
           throw new Error(`Stopped after ${MAX_TOOL_ROUNDS} rounds of tool calls without a final answer.`);
         }
-        const result = await callLLM(buildApiHistory(currentHistory, currentDigests, courseOverview), settings);
+
+        // One bubble per model turn, created before the call so tokens have somewhere to land
+        bubbleId = (Date.now() + Math.random()).toString();
+        partialText = '';
+        currentMessages = [...currentMessages, { id: bubbleId, role: 'assistant', content: '', timestamp: new Date(), streaming: true }];
+        setMessages(currentMessages);
+
+        const result = await callLLM(buildApiHistory(currentHistory, currentDigests, courseOverview), settings, {
+          signal,
+          onDelta: (text) => {
+            partialText += text;
+            if (!paintHandle) paintHandle = requestAnimationFrame(paintPartial); // one paint per frame
+          },
+        });
+        if (paintHandle) cancelAnimationFrame(paintHandle);
+        paintHandle = 0;
         const functionCalls = parseFunctionCalls(result.rawResponse);
 
-        if (result.text) {
-          currentMessages = [
-            ...currentMessages,
-            { id: (Date.now() + Math.random()).toString(), role: 'assistant', content: result.text, timestamp: new Date() },
-          ];
-          setMessages(currentMessages);
-        }
+        const bubble: Message = {
+          ...currentMessages[currentMessages.length - 1],
+          content: result.text,
+          streaming: false,
+          ...(functionCalls.length > 0 ? { activity: functionCalls.map((c) => describeToolCall(c.name, c.args)) } : {}),
+        };
+        // A turn with neither text nor tool calls has nothing to show
+        currentMessages = bubble.content || bubble.activity ? [...currentMessages.slice(0, -1), bubble] : currentMessages.slice(0, -1);
+        setMessages(currentMessages);
 
         const textSignature = extractTextThoughtSignature(result.rawResponse);
         currentHistory = [
@@ -681,12 +881,15 @@ function App() {
             ...(textSignature ? { thoughtSignature: textSignature } : {}),
           },
         ];
+        partialText = '';
+        bubbleId = null;
 
         if (functionCalls.length === 0) break;
 
         toolRounds += 1;
         const toolResults: ToolResult[] = [];
         for (const functionCall of functionCalls) {
+          if (signal.aborted) throw new DOMException('Stopped by the user', 'AbortError');
           const toolImpl = toolFunctions[functionCall.name];
           let toolResult = JSON.stringify({ error: `Tool not found: ${functionCall.name}` });
           if (toolImpl) {
@@ -711,20 +914,41 @@ function App() {
       setContextDigests(currentDigests);
       saveCurrentChat(activeChatId, currentMessages, currentHistory, currentDigests);
     } catch (error) {
-      console.error('Error calling API:', error);
-      const errorMessage: Message = {
-        id: (Date.now() + 1).toString(),
-        role: 'assistant',
-        content: `Error: ${error instanceof Error ? error.message : 'Failed to get response from AI'}`,
-        timestamp: new Date(),
-      };
-      const errorMessages = [...currentMessages, errorMessage];
-      // Drop any dangling tool-call turn so the next request is well-formed
-      const safeHistory = currentHistory.map(capToolResults).filter((m, i, arr) => !(m.toolCalls?.length && i === arr.length - 1));
-      setMessages(errorMessages);
+      if (paintHandle) cancelAnimationFrame(paintHandle);
+      const aborted = isAbortError(error);
+      if (!aborted) console.error('Error calling API:', error);
+
+      // The interrupted turn keeps whatever text arrived; an empty bubble is dropped
+      const interrupted = bubbleId ? currentMessages[currentMessages.length - 1] : null;
+      let finalMessages = interrupted
+        ? partialText
+          ? [...currentMessages.slice(0, -1), { ...interrupted, content: partialText, streaming: false }]
+          : currentMessages.slice(0, -1)
+        : currentMessages;
+      if (!aborted) {
+        finalMessages = [
+          ...finalMessages,
+          {
+            id: (Date.now() + 1).toString(),
+            role: 'assistant',
+            content: `Error: ${error instanceof Error ? error.message : 'Failed to get response from AI'}`,
+            timestamp: new Date(),
+          },
+        ];
+      }
+      // A tool-call turn without results would make the next request malformed: keep its text as
+      // a plain turn (what the user saw) and drop the calls. An interrupted turn keeps its text.
+      const capped = currentHistory.map(capToolResults);
+      const last = capped[capped.length - 1];
+      let safeHistory = last?.toolCalls?.length
+        ? [...capped.slice(0, -1), ...(last.content ? [{ role: 'assistant' as const, content: last.content }] : [])]
+        : capped;
+      if (partialText) safeHistory = [...safeHistory, { role: 'assistant', content: partialText }];
+      setMessages(finalMessages);
       setApiHistory(safeHistory);
-      saveCurrentChat(activeChatId, errorMessages, safeHistory, currentDigests);
+      saveCurrentChat(activeChatId, finalMessages, safeHistory, currentDigests);
     } finally {
+      abortRef.current = null;
       setIsLoading(false);
     }
   };
@@ -746,6 +970,7 @@ function App() {
           <ChatUI
             messages={messages}
             onSendMessage={handleSendMessage}
+            onStop={handleStop}
             isLoading={isLoading}
           />
         )}

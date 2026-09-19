@@ -71,3 +71,17 @@ body {
 .animate-fade-in {
   animation: fade-in 0.3s ease-out;
 }
+
+/* A blinking caret after the last block of a reply that is still streaming */
+.streaming-caret > :last-child::after {
+  content: '▍';
+  margin-left: 1px;
+  color: #6b7280;
+  animation: caret-blink 1s steps(2, start) infinite;
+}
+
+@keyframes caret-blink {
+  to {
+    visibility: hidden;
+  }
+}

@@ -30,10 +30,10 @@ Documents are indexed just in time: the first question about a file downloads it
 **Architecture**
 - Manifest V3 extension for Chrome/Edge, opened as a side panel; Canvas is reached with your existing login session (no Canvas token)
 - React 19 + TypeScript + Tailwind
-- Gemini or OpenAI (and OpenAI-compatible endpoints) for chat and embeddings, with real function-call turns on both
+- Gemini or OpenAI (and OpenAI-compatible endpoints) for chat and embeddings, with real function-call turns on both; replies stream token by token, with a line per tool call the assistant made and a Stop button
 - Chats and settings in localStorage; graph and vectors in PGlite/IndexedDB
 - Hybrid retrieval: pgvector cosine similarity (HNSW index) fused with Postgres full-text search (reciprocal rank fusion)
-- Assistant replies are rendered as sanitized Markdown (DOMPurify allowlist), since their text derives from content other people author on Canvas
+- Assistant replies are rendered as sanitized Markdown (DOMPurify allowlist) with LaTeX via KaTeX, since their text derives from content other people author on Canvas
 - Context management: tool turns are persisted (capped) and older turns are summarized into digests when the configured token threshold is exceeded; the system prompt and tool schemas form a stable, cacheable prefix
 
 For the full architecture reference see [`reference/`](reference/README.md). Agents and developers should read it before changing code (see `CLAUDE.md`).

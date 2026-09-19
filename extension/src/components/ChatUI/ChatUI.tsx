@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Send } from 'lucide-react';
+import { Send, Square, Wrench } from 'lucide-react';
 import { renderMarkdown } from '../../utils/markdown';
 
 export interface Message {
@@ -7,15 +7,28 @@ export interface Message {
   role: 'user' | 'assistant' | 'system';
   content: string;
   timestamp: Date;
+  /** Tokens are still arriving for this bubble. Transient: never persisted. */
+  streaming?: boolean;
+  /** What the assistant did after this text (one line per tool call). Persisted. */
+  activity?: string[];
 }
 
 interface ChatUIProps {
   messages: Message[];
   onSendMessage: (content: string) => void;
+  onStop?: () => void;
   isLoading?: boolean;
 }
 
-export const ChatUI: React.FC<ChatUIProps> = ({ messages, onSendMessage, isLoading = false }) => {
+const TypingDots: React.FC = () => (
+  <div className="flex gap-1 py-1">
+    <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce"></div>
+    <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '0.1s' }}></div>
+    <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '0.2s' }}></div>
+  </div>
+);
+
+export const ChatUI: React.FC<ChatUIProps> = ({ messages, onSendMessage, onStop, isLoading = false }) => {
   const [inputValue, setInputValue] = useState('');
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
@@ -30,6 +43,10 @@ export const ChatUI: React.FC<ChatUIProps> = ({ messages, onSendMessage, isLoadi
       setInputValue('');
     }
   };
+
+  // While a bubble streams it is the progress indicator; the dots row covers the gaps between
+  // model turns (tool execution, digesting) when no bubble is receiving tokens.
+  const streamingBubble = messages.some((m) => m.streaming);
 
   return (
     <div className="flex flex-col h-full w-full bg-gray-50">
@@ -59,36 +76,54 @@ export const ChatUI: React.FC<ChatUIProps> = ({ messages, onSendMessage, isLoadi
                 }`}
               >
                 {message.role === 'assistant' ? (
-                  <div
-                    className="prose prose-sm max-w-none dark:prose-invert break-words [&_*]:break-words [&_code]:break-all [&_pre]:overflow-x-auto"
-                    dangerouslySetInnerHTML={{
-                      __html: renderMarkdown(message.content),
-                    }}
-                  />
+                  <>
+                    {message.streaming && !message.content ? (
+                      <TypingDots />
+                    ) : (
+                      message.content && (
+                        <div
+                          className={`prose prose-sm max-w-none dark:prose-invert break-words [&_*]:break-words [&_code]:break-all [&_pre]:overflow-x-auto ${
+                            message.streaming ? 'streaming-caret' : ''
+                          }`}
+                          dangerouslySetInnerHTML={{
+                            __html: renderMarkdown(message.content),
+                          }}
+                        />
+                      )
+                    )}
+                    {message.activity && message.activity.length > 0 && (
+                      <ul className={`text-xs text-gray-500 space-y-0.5 ${message.content ? 'mt-2 pt-2 border-t border-gray-100' : ''}`}>
+                        {message.activity.map((line, i) => (
+                          <li key={i} className="flex items-center gap-1.5">
+                            <Wrench size={12} className="flex-shrink-0 text-gray-400" />
+                            <span className="truncate">{line}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </>
                 ) : (
                   <div className="text-sm whitespace-pre-wrap break-words overflow-hidden">
                     {message.content}
                   </div>
                 )}
-                <span className="text-xs opacity-70 mt-1 block flex-shrink-0">
-                  {message.timestamp.toLocaleTimeString([], {
-                    hour: '2-digit',
-                    minute: '2-digit',
-                  })}
-                </span>
+                {!message.streaming && (
+                  <span className="text-xs opacity-70 mt-1 block flex-shrink-0">
+                    {message.timestamp.toLocaleTimeString([], {
+                      hour: '2-digit',
+                      minute: '2-digit',
+                    })}
+                  </span>
+                )}
               </div>
             </div>
           ))
         )}
-        
-        {isLoading && (
+
+        {isLoading && !streamingBubble && (
           <div className="flex justify-start w-full min-w-0">
             <div className="bg-white text-gray-900 border border-gray-200 rounded-lg rounded-bl-none px-4 py-2 shadow-sm">
-              <div className="flex gap-1">
-                <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce"></div>
-                <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '0.1s' }}></div>
-                <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '0.2s' }}></div>
-              </div>
+              <TypingDots />
             </div>
           </div>
         )}
@@ -107,13 +142,24 @@ export const ChatUI: React.FC<ChatUIProps> = ({ messages, onSendMessage, isLoadi
             disabled={isLoading}
             className="flex-1 px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-200 disabled:bg-gray-100"
           />
-          <button
-            type="submit"
-            disabled={isLoading || !inputValue.trim()}
-            className="bg-blue-500 hover:bg-blue-600 disabled:bg-gray-300 text-white px-4 py-2 rounded-lg flex items-center gap-2 transition-colors"
-          >
-            <Send size={18} />
-          </button>
+          {isLoading && onStop ? (
+            <button
+              type="button"
+              onClick={onStop}
+              title="Stop"
+              className="bg-gray-700 hover:bg-gray-800 text-white px-4 py-2 rounded-lg flex items-center gap-2 transition-colors"
+            >
+              <Square size={16} />
+            </button>
+          ) : (
+            <button
+              type="submit"
+              disabled={isLoading || !inputValue.trim()}
+              className="bg-blue-500 hover:bg-blue-600 disabled:bg-gray-300 text-white px-4 py-2 rounded-lg flex items-center gap-2 transition-colors"
+            >
+              <Send size={18} />
+            </button>
+          )}
         </form>
       </div>
     </div>
