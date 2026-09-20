@@ -24,7 +24,7 @@ If a change alters something the reference describes — a tool added/removed/ch
 
 `plan.md` (git-ignored, repo root) holds the current review findings and the ranked improvement plan. Check it before proposing changes so you don't re-derive or contradict decisions already made. Items there are proposals until the user confirms them.
 
-`mockups/` (git-ignored) holds standalone React mockups of candidate UIs for the overhaul, written against `mockups/src/shared/model.ts` (`AppModel`); `mockups/README.md` explains how one is ported into the extension.
+`tmp/` (git-ignored) holds scratch material: the standalone React mockups the UI was ported from (`tmp/mockups/`, written against `tmp/mockups/src/shared/model.ts`), Canvas API probe scripts, and notes.
 
 ## Hard rules
 

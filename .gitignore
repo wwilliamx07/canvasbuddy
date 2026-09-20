@@ -2,11 +2,5 @@
 node_modules
 uploads
 plan.md
-probe-canvas.js
-probe-file.js
-probe out
-out.txt
-todo.txt
+tmp
 reference/.obsidian
-probe-home.js
-mockups
