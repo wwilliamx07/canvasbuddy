@@ -29,6 +29,7 @@ If a change alters something the reference describes — a tool added/removed/ch
 ## Hard rules
 
 - Do not spawn subagents on your own. Delegate only when the user explicitly asks for it in the current request.
+- Do not push. Commit when asked; pushing happens only when the user says "push" in the current request — "commit" alone never implies it.
 - Do not change code without the user's confirmation when the change alters the tool contract, the schema, or the system prompt.
 - Do not remove the PGlite Web Lock, the `'wasm-unsafe-eval'` CSP, `optimizeDeps.exclude` for PGlite, or the `?url` pdf.js worker import.
 - Never call a sync/prune function with a partial list.

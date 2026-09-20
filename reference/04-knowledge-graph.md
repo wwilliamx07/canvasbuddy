@@ -93,7 +93,7 @@ Each collection is a `CollectionSpec` in the registry: a `sync` (full or, given 
 | `discussions` | `/courses/:c/discussion_topics?order_by=recent_activity` (newest 100) | newest topic `id:last_reply_at:posted_at` | — (topics); replies per topic on demand via `/discussion_topics/:id/view` |
 | `quizzes` | `/courses/:c/quizzes` | — (TTL) | — |
 | `syllabus` | `/courses/:c?include[]=syllabus_body` | the body itself, fingerprinted (`length:hash`); the probe's fetch is handed to the sync as `probeData` | stores `courses.syllabus_body`, ingests its links |
-| `home` | `/courses/:c/front_page` (404 = no front page, not "unavailable") | front page `updated_at`; the probe's fetch is handed to the sync as `probeData` | sets `pages.front_page`, ingests the page's links (registers linked files/pages). Ensured by `list_content(kind="files"/"pages")`. |
+| `home` | `/courses/:c/front_page` (404 = no front page, not "unavailable") | front page `updated_at`; the probe's fetch is handed to the sync as `probeData` | sets `pages.front_page`, ingests the page's links (registers linked files/pages). Ensured by `list_content(kind="files"/"pages")`, with `syllabus`, `announcements` and `discussions`, so every body that links course material has been ingested before the union is read. |
 
 ## Freshness (`canvas/freshness.ts`, `canvas/collections.ts`)
 

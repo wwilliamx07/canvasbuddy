@@ -71,13 +71,13 @@ export const TOOL_CONFIG: ToolConfig[] = [
   {
     name: 'list_content',
     description:
-      'List a course\'s structure or a specific kind of content. kind="courses" also tells what each course\'s Home shows, its nav bar (incl. external tools) and whether it has a syllabus; "items" finds files/pages/quizzes/discussions inside modules; "files"/"pages" list every file/page the course is known to have — the Files/Pages areas when visible plus everything linked from modules, the home page, announcements, assignment descriptions, discussions and the syllabus (linked_from says where) — with the syllabus and home page listed first under "pages"; "assignments" gives names, due dates, points and optionally your submission status; "quizzes" gives quiz details the assignment list lacks: time limit, allowed attempts, question count, availability window, and optionally your submission. Always pass search when the user named something; keep limit small.',
+      'List what a course has. kind="courses": the roster with what each course\'s Home shows, whether it has a syllabus, and its nav bar incl. external tools (Piazza, recordings) to point the student to. "modules": structure only. "items": what sits inside modules (files, pages, assignments, quizzes, discussions) — the way to find a lecture by name or week. "files": every file the course is known to have, wherever it was found — the Files area if visible (often hidden from students, which is normal), modules, and links on the home page, syllabus, announcements, discussion topics and anything already read; linked_from says where. "pages": likewise for pages, with the syllabus document and the home page first. "assignments": names, due dates, points, optionally your submission. "quizzes": time limit, attempts, question count, availability, optionally your submission.',
     parameters: {
       type: 'OBJECT',
       properties: {
         kind: { type: 'STRING', description: 'What to list', enum: ['courses', 'modules', 'items', 'assignments', 'quizzes', 'files', 'pages'] },
         course_id: { type: 'STRING', description: 'Course id (from the course list). Required for everything except kind="courses".' },
-        search: { type: 'STRING', description: 'Case-insensitive substring on the name/title (e.g. "lecture 4", "week 3", "midterm"). Use whenever the user mentioned a name, topic, week or number.' },
+        search: { type: 'STRING', description: 'Case-insensitive substring of the name/title. Pass whenever the user named a topic, week or number.' },
         module_id: { type: 'STRING', description: 'kind="items" only: restrict to one module.' },
         bucket: { type: 'STRING', description: 'kind="assignments"/"quizzes": due-date filter. Default "upcoming" for assignments, "all" for quizzes.', enum: ['upcoming', 'past', 'undated', 'all'] },
         include_submission: { type: 'BOOLEAN', description: 'kind="assignments"/"quizzes": include your submission status, score and grade per row.' },
@@ -89,7 +89,7 @@ export const TOOL_CONFIG: ToolConfig[] = [
   },
   {
     name: 'get_assignment',
-    description: 'Full details of one assignment: description text, due date, points, submission types, and your submission status/score/grade. Use after list_content identified the assignment.',
+    description: 'One assignment in full: description, due date, points, submission types, and your submission status, score and grade.',
     parameters: {
       type: 'OBJECT',
       properties: {
@@ -103,7 +103,7 @@ export const TOOL_CONFIG: ToolConfig[] = [
   {
     name: 'search_documents',
     description:
-      'Semantic + keyword search over course documents (PDF/PPTX files, wiki pages, assignment descriptions, the syllabus), discussion threads and inbox messages; returns the best excerpts with document name and page/slide for citation. To search inside one specific document, pass document_type + document_id (from list_content / get_discussions / get_inbox); it is indexed automatically if needed. Without them, previously indexed documents are searched semantically and all stored inbox messages and discussion replies by keyword.',
+      'Find the passages that answer a question inside a document: files (PDF/PPTX), pages, assignment descriptions, the syllabus (course policies, grading scheme, office hours: document_type="syllabus", document_id=course id), discussion threads, inbox threads. Returns excerpts with document name and page/slide to cite. Pass document_type + document_id to search one document (ids come from list_content, get_discussions, get_inbox, or a [file …]/[page …]/[assignment …] marker in text you have read); without them, everything already read is searched.',
     parameters: {
       type: 'OBJECT',
       properties: {
@@ -119,7 +119,7 @@ export const TOOL_CONFIG: ToolConfig[] = [
   {
     name: 'read_document',
     description:
-      'Read the text of a document, a discussion thread (topic + all replies) or an inbox thread directly, optionally a page/slide range like "3-5". Indexes the document first if needed. Use when the user wants the actual content of specific pages, a whole short page, the syllabus, or a full thread — not for finding where something is (use search_documents).',
+      'The text of a document (see search_documents for the kinds) or of a whole discussion or inbox thread, optionally a page/slide range like "3-5". For when the user wants the content itself; to find where something is said, use search_documents. Text keeps links as markers — [file 123], [page slug], [assignment 45], <https://…> — which are document ids you can follow.',
     parameters: {
       type: 'OBJECT',
       properties: {
@@ -133,7 +133,7 @@ export const TOOL_CONFIG: ToolConfig[] = [
   },
   {
     name: 'get_announcements',
-    description: 'Recent announcements for a course, newest first, with the message text.',
+    description: 'A course\'s announcements, newest first, with their text.',
     parameters: {
       type: 'OBJECT',
       properties: {
@@ -147,7 +147,7 @@ export const TOOL_CONFIG: ToolConfig[] = [
   {
     name: 'get_discussions',
     description:
-      'Discussion topics of a course (the forum: Q&A, weekly threads, graded discussions), most recent activity first, with the topic text and reply count. search matches titles and topic text. To read the replies of a topic use read_document(document_type="discussion"); to find what was said about something across replies use search_documents(document_type="discussion", document_id=…).',
+      'A course\'s forum: discussion topics by recent activity, with topic text and reply count. The replies are a document (document_type="discussion") for search_documents / read_document.',
     parameters: {
       type: 'OBJECT',
       properties: {
@@ -162,7 +162,7 @@ export const TOOL_CONFIG: ToolConfig[] = [
   {
     name: 'get_planner',
     description:
-      'The student\'s planner across ALL courses: assignments, quizzes, events and to-dos with due dates and submission state. Best tool for "what do I have this week / what is due / what am I missing". Defaults to the next 7 days.',
+      'What is due across all courses in a date window (default the next 7 days): assignments, quizzes, events and to-dos with submission state. The answer to "what do I have this week / what am I missing".',
     parameters: {
       type: 'OBJECT',
       properties: {
@@ -175,7 +175,7 @@ export const TOOL_CONFIG: ToolConfig[] = [
   {
     name: 'get_inbox',
     description:
-      'Canvas inbox conversations (messages with instructors, TAs, classmates), newest first, with a snippet of the last message. search finds conversations whose subject or any message matches. Use read_document(document_type="conversation") to read a full thread.',
+      'Inbox conversations (messages with instructors, TAs, classmates), newest first, with a snippet of the last message. A thread is a document (document_type="conversation") for search_documents / read_document.',
     parameters: {
       type: 'OBJECT',
       properties: {
@@ -379,9 +379,10 @@ export const toolFunctions: Record<string, ToolFn> = {
       }
 
       if (kind === 'files' || kind === 'pages') {
-        // The area listing (when the course shows it) plus everything discovered through modules
-        // and links on the home page / pages / assignments / announcements / discussions / syllabus.
-        const results = await ensureCollections([kind, 'modules', 'home', ...(kind === 'pages' ? ['syllabus' as const] : [])], { courseId }, { settings, refresh });
+        // The area listing (when the course shows it) plus everything discovered through modules and
+        // through links in every body the course publishes: home page, syllabus, announcements,
+        // discussion topics. Assignment/quiz descriptions and other pages add links once read.
+        const results = await ensureCollections([kind, 'modules', 'home', 'syllabus', 'announcements', 'discussions'], { courseId }, { settings, refresh });
         let rows = kind === 'files'
           ? await listCourseFiles(courseId, args.search, limit)
           : await listCoursePages(courseId, args.search, limit);
