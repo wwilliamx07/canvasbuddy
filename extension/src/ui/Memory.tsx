@@ -413,7 +413,7 @@ function StatTile({ label, value }: { label: string; value: number }) {
   );
 }
 
-function CourseList({ memory, onForgetAll }: { memory: MemoryModel; onForgetAll: () => void }) {
+function CourseList({ memory }: { memory: MemoryModel }) {
   const { stats, courses } = memory;
   return (
     <div className="px-4 py-4">
@@ -440,8 +440,9 @@ function CourseList({ memory, onForgetAll }: { memory: MemoryModel; onForgetAll:
         <div className="mt-6 flex justify-center border-t border-(--line) pt-4">
           <button
             type="button"
-            onClick={onForgetAll}
-            className="inline-flex items-center gap-1.5 rounded-full border border-(--line) px-3 py-1.5 text-[12.5px] text-(--error) hover:bg-(--error-soft)"
+            disabled={memory.isForgetting}
+            onClick={memory.forgetEverything}
+            className="inline-flex items-center gap-1.5 rounded-full border border-(--line) px-3 py-1.5 text-[12.5px] text-(--error) hover:bg-(--error-soft) disabled:opacity-60"
           >
             <Trash2 size={12} /> Forget everything
           </button>
@@ -451,7 +452,7 @@ function CourseList({ memory, onForgetAll }: { memory: MemoryModel; onForgetAll:
   );
 }
 
-export function MemorySheet({ memory, onForgetAll, onClose }: { memory: MemoryModel; onForgetAll: () => void; onClose: () => void }) {
+export function MemorySheet({ memory, onClose }: { memory: MemoryModel; onClose: () => void }) {
   const detail = memory.selectedCourseId != null;
   const title = detail ? (memory.course?.course.course_code ?? 'Course') : 'Memory';
 
@@ -470,7 +471,7 @@ export function MemorySheet({ memory, onForgetAll, onClose }: { memory: MemoryMo
             exit={{ opacity: 0, x: detail ? -16 : 16 }}
             transition={{ duration: 0.18, ease: [0.22, 1, 0.36, 1] }}
           >
-            {detail ? <CourseDetail memory={memory} /> : <CourseList memory={memory} onForgetAll={onForgetAll} />}
+            {detail ? <CourseDetail memory={memory} /> : <CourseList memory={memory} />}
           </motion.div>
         </AnimatePresence>
         <StatusLine message={memory.statusMessage} />

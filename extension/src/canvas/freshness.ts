@@ -1,5 +1,5 @@
 import { getDB, withTransaction } from '../db/pglite';
-import { forgetCollectionRows } from '../db/graph';
+import { clearGraphRows, forgetCollectionRows } from '../db/graph';
 import { isUnavailableError } from './http';
 import type { AppSettings } from '../settings';
 
@@ -219,6 +219,14 @@ export async function forgetCollection(kind: CollectionKind, courseId: string): 
     // Forgetting the pages removes the front page row too; the home stamp would otherwise say it is current
     const scopes = kind === 'pages' ? [scope, scopeKey('home', { courseId })] : [scope];
     await tx.query('DELETE FROM sync_state WHERE scope = ANY($1::text[])', [scopes]);
+  });
+}
+
+/** Forgets the whole graph (every course, document, planner, inbox) and every sync stamp. Chats are kept. */
+export async function forgetEverything(): Promise<void> {
+  await withTransaction(async (tx) => {
+    await clearGraphRows(tx);
+    await tx.query('DELETE FROM sync_state');
   });
 }
 

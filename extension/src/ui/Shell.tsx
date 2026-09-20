@@ -72,7 +72,7 @@ export function Shell({ model }: ShellProps) {
         </AnimatePresence>
       </div>
 
-      <AnimatePresence>{sheet === 'memory' && <MemorySheet memory={model.memory} onForgetAll={model.forgetMemory} onClose={() => setSheet(null)} />}</AnimatePresence>
+      <AnimatePresence>{sheet === 'memory' && <MemorySheet memory={model.memory} onClose={() => setSheet(null)} />}</AnimatePresence>
       <AnimatePresence>{sheet === 'settings' && <SettingsSheet model={model} onClose={() => setSheet(null)} />}</AnimatePresence>
     </div>
   );

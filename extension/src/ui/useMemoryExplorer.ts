@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { exploreGraph, getCourseSyllabus, getGraphStatistics, listAnnouncements, listDiscussions, listQuizzes } from '../db/graph';
 import { docIdFor, forgetDocument, getFileChunks, getFilesList } from '../db/rag';
-import { forgetCollection, getSyncState, scopeKey, type CollectionKind } from '../canvas/freshness';
+import { forgetCollection, forgetEverything, getSyncState, scopeKey, type CollectionKind } from '../canvas/freshness';
 import type {
   AssignmentRow,
   Chunk,
@@ -364,6 +364,22 @@ export function useMemoryExplorer(enabled: boolean): MemoryModel & { reload: () 
     }
   };
 
+  const forgetEverythingAction = async () => {
+    if (!window.confirm('Forget everything remembered about your courses? Chats are kept; courses and documents are fetched again as you ask about them.')) return;
+    setIsForgetting(true);
+    try {
+      await forgetEverything();
+      setSelectedCourseId(null);
+      setSelectedNode(null);
+      showStatus('Forgot everything.');
+      reload();
+    } catch (e) {
+      showStatus(`Could not forget: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setIsForgetting(false);
+    }
+  };
+
   return {
     stats,
     courses,
@@ -378,6 +394,7 @@ export function useMemoryExplorer(enabled: boolean): MemoryModel & { reload: () 
     nodeChunks,
     forgetCollection: (kind) => void forgetCollectionAction(kind),
     forgetSelected: () => void forgetSelected(),
+    forgetEverything: () => void forgetEverythingAction(),
     isForgetting,
     statusMessage,
     reload,

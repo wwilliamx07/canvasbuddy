@@ -1050,6 +1050,20 @@ export async function forgetCollectionRows(kind: CollectionKind, courseId: strin
   }
 }
 
+/**
+ * Empties the whole graph — every course and what hangs off it, every document, the planner
+ * window, the inbox and the link/edge tables — leaving the schema in place. Chats are not
+ * stored here and are untouched.
+ */
+export async function clearGraphRows(tx?: Queryable): Promise<void> {
+  const db = await q(tx);
+  await db.query('DELETE FROM courses'); // cascades to modules, items, assignments, submissions, pages, tabs, links, …
+  await db.query('DELETE FROM files'); // cascades to file_chunks; course_id was set null by the course delete
+  await db.query('DELETE FROM conversations'); // cascades to messages
+  await db.query('DELETE FROM planner_items');
+  await db.query('DELETE FROM graph_edges');
+}
+
 /** The planner window is replaced wholesale on every sync. */
 export async function replacePlannerItems(rows: ShapedPlannerItem[], tx?: Queryable): Promise<number> {
   const db = await q(tx);
