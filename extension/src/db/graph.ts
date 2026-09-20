@@ -246,14 +246,23 @@ export async function listCourseFiles(courseId: string, search?: string, limit?:
 export async function listCoursePages(courseId: string, search?: string, limit?: number): Promise<any[]> {
   const db = await getDB();
   const res = await db.query(
-    `WITH linked AS (${LINKED_FROM_SQL})
-     SELECT p.page_url, p.title, p.updated_at, p.html_url, p.front_page,
-       COALESCE(f.total_chunks, 0) > 0 AS indexed, l.linked_from
-     FROM pages p
-     LEFT JOIN files f ON f.file_id = 'page:' || p.course_id || ':' || p.page_url
-     LEFT JOIN linked l ON l.to_ref = p.page_url
-     WHERE p.course_id = $1 AND ($4::text IS NULL OR p.title ILIKE $4 OR l.linked_from ILIKE $4)
-     ORDER BY p.front_page DESC, p.title ASC
+    `WITH linked AS (${LINKED_FROM_SQL}),
+     known AS (
+       SELECT p.page_url, p.title, p.updated_at, p.html_url, p.front_page,
+         COALESCE(f.total_chunks, 0) > 0 AS indexed
+       FROM pages p
+       LEFT JOIN files f ON f.file_id = 'page:' || p.course_id || ':' || p.page_url
+       WHERE p.course_id = $1
+       UNION
+       SELECT mi.content_ref, mi.title, NULL, mi.html_url, FALSE, FALSE
+       FROM module_items mi JOIN modules m ON m.module_id = mi.module_id
+       WHERE m.course_id = $1 AND mi.item_type = 'Page' AND mi.content_ref IS NOT NULL
+         AND mi.content_ref NOT IN (SELECT page_url FROM pages WHERE course_id = $1)
+     )
+     SELECT k.page_url, k.title, k.updated_at, k.html_url, k.front_page, k.indexed, l.linked_from
+     FROM known k LEFT JOIN linked l ON l.to_ref = k.page_url
+     WHERE ($4::text IS NULL OR k.title ILIKE $4 OR l.linked_from ILIKE $4)
+     ORDER BY k.front_page DESC, k.title ASC
      LIMIT $5`,
     [String(courseId), 'Page', 'page', search ? `%${search}%` : null, clampLimit(limit)]
   );

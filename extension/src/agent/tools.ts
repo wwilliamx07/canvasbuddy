@@ -71,7 +71,7 @@ export const TOOL_CONFIG: ToolConfig[] = [
   {
     name: 'list_content',
     description:
-      'List what a course has. kind="courses": the roster with what each course\'s Home shows, whether it has a syllabus, and its nav bar incl. external tools (Piazza, recordings) to point the student to. "modules": structure only. "items": what sits inside modules (files, pages, assignments, quizzes, discussions) — the way to find a lecture by name or week. "files": every file the course is known to have, wherever it was found — the Files area if visible (often hidden from students, which is normal), modules, and links on the home page, syllabus, announcements, discussion topics and anything already read; linked_from says where. "pages": likewise for pages, with the syllabus document and the home page first. "assignments": names, due dates, points, optionally your submission. "quizzes": time limit, attempts, question count, availability, optionally your submission.',
+      'List what a course has. kind="courses": the roster with what each course\'s Home shows, whether it has a syllabus, and its nav bar incl. external tools (Piazza, recordings) to point the student to. "modules": structure only. "items": what sits inside modules (files, pages, assignments, quizzes, discussions) — the way to find a lecture by name or week. "files": every file the course is known to have, wherever it was found — the Files area if visible (often hidden from students, which is normal), modules, and links on the home page, syllabus, announcements, discussion topics, quiz descriptions and anything already read; linked_from says where. "pages": likewise for pages, with the syllabus document and the home page first. "assignments": names, due dates, points, optionally your submission. "quizzes": time limit, attempts, question count, availability, optionally your submission.',
     parameters: {
       type: 'OBJECT',
       properties: {
@@ -381,8 +381,8 @@ export const toolFunctions: Record<string, ToolFn> = {
       if (kind === 'files' || kind === 'pages') {
         // The area listing (when the course shows it) plus everything discovered through modules and
         // through links in every body the course publishes: home page, syllabus, announcements,
-        // discussion topics. Assignment/quiz descriptions and other pages add links once read.
-        const results = await ensureCollections([kind, 'modules', 'home', 'syllabus', 'announcements', 'discussions'], { courseId }, { settings, refresh });
+        // discussion topics, quiz descriptions. Assignment descriptions and other pages add links once read.
+        const results = await ensureCollections([kind, 'modules', 'home', 'syllabus', 'announcements', 'discussions', 'quizzes'], { courseId }, { settings, refresh });
         let rows = kind === 'files'
           ? await listCourseFiles(courseId, args.search, limit)
           : await listCoursePages(courseId, args.search, limit);
