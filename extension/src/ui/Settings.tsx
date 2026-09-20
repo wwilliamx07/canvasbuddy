@@ -9,7 +9,7 @@ const MODEL_PLACEHOLDER: Record<AppSettings['llmProvider'], string> = { google: 
 const EMBED_PLACEHOLDER: Record<AppSettings['llmProvider'], string> = { google: 'gemini-embedding-2', openai: 'text-embedding-3-small' };
 
 export function SettingsSheet({ model, onClose }: { model: AppModel; onClose: () => void }) {
-  const { settings, updateSettings, currentContextTokens, connection, disconnect, forgetMemory } = model;
+  const { settings, updateSettings, currentContextTokens, connection, disconnect, deleteAccountData } = model;
   const [showKey, setShowKey] = useState(false);
   const [saved, setSaved] = useState(false);
   const savedTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
@@ -44,10 +44,10 @@ export function SettingsSheet({ model, onClose }: { model: AppModel; onClose: ()
               <div className="flex flex-wrap gap-2 pt-1">
                 <button
                   type="button"
-                  onClick={forgetMemory}
+                  onClick={deleteAccountData}
                   className="rounded-full border border-(--line) px-3 py-1.5 text-[12.5px] text-(--error) hover:bg-(--error-soft)"
                 >
-                  Forget this memory
+                  Delete this account's data
                 </button>
                 <button
                   type="button"

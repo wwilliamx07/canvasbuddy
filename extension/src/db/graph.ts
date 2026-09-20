@@ -1050,6 +1050,14 @@ export async function forgetCollectionRows(kind: CollectionKind, courseId: strin
   }
 }
 
+/** Drops one course and everything remembered under it (its documents included). */
+export async function forgetCourseRows(courseId: string, tx?: Queryable): Promise<void> {
+  const db = await q(tx);
+  await db.query('DELETE FROM files WHERE course_id = $1', [String(courseId)]); // before the course delete sets course_id null
+  await db.query('DELETE FROM courses WHERE course_id = $1', [String(courseId)]);
+  await pruneOrphanEdges(db);
+}
+
 /**
  * Empties the whole graph — every course and what hangs off it, every document, the planner
  * window, the inbox and the link/edge tables — leaving the schema in place. Chats are not

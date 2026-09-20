@@ -731,10 +731,10 @@ function App() {
     setConnectNonce((n) => n + 1);
   };
 
-  const handleForgetMemory = async () => {
+  const handleDeleteAccountData = async () => {
     if (connection.status !== 'connected') return;
     const { memory } = connection;
-    if (!window.confirm(`Forget everything remembered for ${memory.name} (${memory.host})? Courses, documents and chats for this account will be deleted.`)) return;
+    if (!window.confirm(`Delete everything CanvasBuddy has for ${memory.name} (${memory.host})? Courses, documents and chats for this account will be removed from this browser.`)) return;
     await closeDB();
     await forgetMemory(memory);
     window.location.reload();
@@ -1110,7 +1110,7 @@ function App() {
     reload: () => window.location.reload(),
     connect,
     disconnect: handleDisconnect,
-    forgetMemory: () => void handleForgetMemory(),
+    deleteAccountData: () => void handleDeleteAccountData(),
 
     memory,
   };

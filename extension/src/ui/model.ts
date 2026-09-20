@@ -243,6 +243,8 @@ export interface MemoryModel {
   forgetCollection: (kind: CollectionKind) => void;
   /** Forget the selected node's document text; it is indexed again when next searched or read. */
   forgetSelected: () => void;
+  /** Forget the selected course and everything remembered under it. */
+  forgetCourse: () => void;
   /** Forget the whole graph (every course, document, planner, inbox). Chats are kept. */
   forgetEverything: () => void;
   isForgetting: boolean;
@@ -280,8 +282,8 @@ export interface AppModel {
   connect: ConnectModel;
   /** "Switch Canvas": drop the host, show the Connect screen (memory is kept). */
   disconnect: () => void;
-  /** "Forget this memory" (Settings): confirm, delete the database, chats and memory slot for this account, reload. */
-  forgetMemory: () => void;
+  /** "Delete this account's data" (Settings): confirm, delete the database, chats and memory slot for this account, reload. */
+  deleteAccountData: () => void;
 
   memory: MemoryModel;
 }

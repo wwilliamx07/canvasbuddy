@@ -385,6 +385,17 @@ function CourseDetail({ memory }: { memory: MemoryModel }) {
           </Section>
         </>
       )}
+
+      <div className="mt-6 flex justify-center border-t border-(--line) pt-4">
+        <button
+          type="button"
+          disabled={memory.isForgetting}
+          onClick={memory.forgetCourse}
+          className="inline-flex items-center gap-1.5 rounded-full border border-(--line) px-3 py-1.5 text-[12.5px] text-(--error) hover:bg-(--error-soft) disabled:opacity-60"
+        >
+          <Trash2 size={12} /> Forget this course
+        </button>
+      </div>
     </div>
   );
 }

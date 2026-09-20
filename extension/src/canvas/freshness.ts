@@ -1,5 +1,5 @@
 import { getDB, withTransaction } from '../db/pglite';
-import { clearGraphRows, forgetCollectionRows } from '../db/graph';
+import { clearGraphRows, forgetCollectionRows, forgetCourseRows } from '../db/graph';
 import { isUnavailableError } from './http';
 import type { AppSettings } from '../settings';
 
@@ -219,6 +219,17 @@ export async function forgetCollection(kind: CollectionKind, courseId: string): 
     // Forgetting the pages removes the front page row too; the home stamp would otherwise say it is current
     const scopes = kind === 'pages' ? [scope, scopeKey('home', { courseId })] : [scope];
     await tx.query('DELETE FROM sync_state WHERE scope = ANY($1::text[])', [scopes]);
+  });
+}
+
+/**
+ * Forgets one course: its rows, its documents and its sync stamps. The roster stamp goes too, so
+ * the course reappears on the next turn (the courses TTL is a week) rather than staying hidden.
+ */
+export async function forgetCourse(courseId: string): Promise<void> {
+  await withTransaction(async (tx) => {
+    await forgetCourseRows(courseId, tx);
+    await tx.query("DELETE FROM sync_state WHERE scope = 'courses' OR scope LIKE $1", [`course:${courseId}:%`]);
   });
 }
 

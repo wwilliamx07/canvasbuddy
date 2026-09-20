@@ -33,7 +33,7 @@ If a change alters something the reference describes — a tool added/removed/ch
 - Do not remove the PGlite Web Lock, the `'wasm-unsafe-eval'` CSP, `optimizeDeps.exclude` for PGlite, or the `?url` pdf.js worker import.
 - Never call a sync/prune function with a partial list.
 - Tools reach Canvas through `ensureCollection` (freshness engine), never by fetching collection data directly. No staleness/"go live" language in the prompt or tool descriptions.
-- Memory is engine-managed: nothing under `src/ui` may call `ensureCollection`, a sync, or `indexDocumentJustInTime`. The UI reads the graph and offers only forgetting (`forgetCollection`, `forgetDocument`, `forgetEverything`; "Forget this memory" in Settings is the account-level wipe that also removes chats). No sync/refresh/index buttons.
+- Memory is engine-managed: nothing under `src/ui` may call `ensureCollection`, a sync, or `indexDocumentJustInTime`. The UI reads the graph and offers only forgetting (`forgetDocument`, `forgetCollection`, `forgetCourse`, `forgetEverything`; "Delete this account's data" in Settings is the account-level wipe that also removes chats). No sync/refresh/index buttons.
 - The UI is written against `AppModel` (`src/ui/model.ts`); components take the model, never data-layer imports. Extend the model (and the hook that fills it) before a component.
 - Tool implementations return JSON strings and never throw; tool args arrive as strings.
 - SQL lives in `src/db/*`; components and tools call functions.

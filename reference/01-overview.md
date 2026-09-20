@@ -21,7 +21,7 @@ The constraints above led to a small set of principles that explain most of the 
 - **Shape at the boundary, store thin mirrors.** Canvas payloads are reduced to the fields the app reads before they enter the database; types are deliberately thin. Ids are strings everywhere. Sync is upsert + prune inside one transaction, only ever with a complete list.
 - **Cacheable prompt prefix.** The system prompt and tool schemas are fixed for a session; anything per-turn (the course roster, digests) rides on messages, so provider prompt caching keeps working.
 - **Compact context.** Tool results are capped when persisted, conversations are digested past a threshold, and shaped rows omit anything the model does not need (no HTML bodies in overviews).
-- **Memory is engine-managed.** The user never syncs, refreshes or indexes by hand; the Memory sheet only shows what the agent has remembered and lets the user forget parts of it (a collection, a document's text, the whole graph). Anything forgotten comes back the next time a tool needs it. Chats are not memory: only "Forget this memory" (the account-level wipe in Settings) removes them.
+- **Memory is engine-managed.** The user never syncs, refreshes or indexes by hand; the Memory sheet only shows what the agent has remembered and lets the user forget parts of it (a document's text, a collection, a course, the whole graph). Anything forgotten comes back the next time a tool needs it. Chats are not memory: only "Delete this account's data" (Settings) removes them.
 - **Everything is local and per-identity.** One database and chat list per `<host>/<userId>`; settings are global. No server, no telemetry, the API key never leaves the browser except to the chosen provider.
 
 ## Runtime environment
