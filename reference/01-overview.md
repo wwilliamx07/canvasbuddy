@@ -8,7 +8,20 @@ Design constraints that shape everything:
 
 1. **No backend.** All compute, storage, and API calls happen in the extension page. The user brings their own LLM API key.
 2. **Canvas access rides on the browser session.** No Canvas API token is stored; requests go out with `credentials: 'include'` and succeed because the user is logged into their Canvas in the same browser profile. Known instances (`knownHosts` in `canvas/profiles.ts`, currently `q.utoronto.ca`) are granted in the manifest and connect silently at startup; any other Canvas is connected once through the Connect screen, which requests its origin. A deployment profile (Quercus or generic) names it in the prompt.
-3. **Token economy matters.** Canvas payloads are large and the user pays per token, so the system caches structure locally and instructs the model to read the cache before going live.
+3. **Token economy matters.** Canvas payloads are large and the user pays per token, so the system mirrors structure locally, hands the model compact shaped rows, and never makes it decide between cached and live data.
+
+## Design philosophy
+
+The constraints above led to a small set of principles that explain most of the code. When a change is hard to fit, it is usually fighting one of these.
+
+- **Maximal caching, engine-owned freshness.** Everything the agent reads comes from the local graph (PGlite in IndexedDB). Canvas is only contacted by the freshness engine (`ensureCollection`): per-collection TTLs, cheap change probes where Canvas offers one, per-course "unavailable" tracking, in-flight de-duplication. The model never sees a cache/live choice and the prompt contains no staleness language; the only cache-related tool parameter is `refresh`, reserved for "the user says something changed". Data that is fetched is kept: text is stored eagerly, old chunk vectors are kept as a cache for re-indexing, and prune is the only thing that deletes.
+- **Lazy by default.** Nothing is fetched or computed until something needs it: courses are listed when asked, a course's modules when it is explored, a document's text when it is first read or searched, assignment descriptions on first access, discussion replies when a thread is opened. Embeddings are the strictest case — no sync path may call the embedding API; a document is embedded only when a semantic search is about to target it. Being lazy is what keeps first use fast and the user's API bill proportional to what they actually ask.
+- **A minimal, graph-backed toolset.** Eight tools, each a thin read over the local graph with one shape of output, rather than one tool per Canvas endpoint. The tool descriptions and the system prompt are a single contract; capability is added by widening a tool's `kind` or adding a collection, not by adding tools. Tools return JSON and never throw, so the model can recover from `{ error }`.
+- **Discovery through links, not listings.** Canvas hides Files and Pages listings from students at UofT but serves every item by id, so the graph is built from what links to what: module items, the course home page, and links inside every HTML body (`content_links`). Link markers (`[file 123]`, `[page slug]`) are part of document text so the model can hop.
+- **Shape at the boundary, store thin mirrors.** Canvas payloads are reduced to the fields the app reads before they enter the database; types are deliberately thin. Ids are strings everywhere. Sync is upsert + prune inside one transaction, only ever with a complete list.
+- **Cacheable prompt prefix.** The system prompt and tool schemas are fixed for a session; anything per-turn (the course roster, digests) rides on messages, so provider prompt caching keeps working.
+- **Compact context.** Tool results are capped when persisted, conversations are digested past a threshold, and shaped rows omit anything the model does not need (no HTML bodies in overviews).
+- **Everything is local and per-identity.** One database and chat list per `<host>/<userId>`; settings are global. No server, no telemetry, the API key never leaves the browser except to the chosen provider.
 
 ## Runtime environment
 

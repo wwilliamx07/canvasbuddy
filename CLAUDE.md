@@ -24,8 +24,11 @@ If a change alters something the reference describes — a tool added/removed/ch
 
 `plan.md` (git-ignored, repo root) holds the current review findings and the ranked improvement plan. Check it before proposing changes so you don't re-derive or contradict decisions already made. Items there are proposals until the user confirms them.
 
+`mockups/` (git-ignored) holds standalone React mockups of candidate UIs for the overhaul, written against `mockups/src/shared/model.ts` (`AppModel`); `mockups/README.md` explains how one is ported into the extension.
+
 ## Hard rules
 
+- Do not spawn subagents on your own. Delegate only when the user explicitly asks for it in the current request.
 - Do not change code without the user's confirmation when the change alters the tool contract, the schema, or the system prompt.
 - Do not remove the PGlite Web Lock, the `'wasm-unsafe-eval'` CSP, `optimizeDeps.exclude` for PGlite, or the `?url` pdf.js worker import.
 - Never call a sync/prune function with a partial list.
