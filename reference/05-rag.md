@@ -4,7 +4,7 @@ Sources: `src/canvas/sync.ts` (`indexDocumentJustInTime`, `loadDocumentSource`, 
 
 ## Design
 
-Documents are indexed **just in time**, not in bulk: nothing is downloaded or embedded until the agent (or the user in the Graph Explorer) asks for a specific document. This is a rule, not an optimization: **no sync ever spends embedding calls**; vectors are computed only for a document a semantic search is about to look through. Indexing stores page-bound chunks with 768-d vectors and a full-text index in PGlite; search fuses vector and keyword ranking. Answers cite the document and page/slide range because every chunk records exactly which pages it covers.
+Documents are indexed **just in time**, not in bulk: nothing is downloaded or embedded until the agent asks for a specific document (the user cannot trigger indexing; the Memory sheet only shows what was read). This is a rule, not an optimization: **no sync ever spends embedding calls**; vectors are computed only for a document a semantic search is about to look through. Indexing stores page-bound chunks with 768-d vectors and a full-text index in PGlite; search fuses vector and keyword ranking. Answers cite the document and page/slide range because every chunk records exactly which pages it covers.
 
 Six document kinds live in the same tables (`DocumentSourceType = 'file' | 'page' | 'assignment' | 'conversation' | 'discussion' | 'syllabus'`); files, pages, assignments and the syllabus share the JIT pipeline below, while inbox and discussion threads are stored incrementally as entries:
 
@@ -83,7 +83,7 @@ result = fused ⋈ file_chunks ⋈ files ⋈ courses, plus ONE module name via L
 
 - Agent: `search_documents` (indexes the named document via `indexDocumentJustInTime` when `document_id` is given, then `getEmbedding(query)` + `searchChunksHybrid`), `read_document` (indexes if needed, then `getFileChunks(docId, pageRange)` — a chunk is returned when its page range overlaps the requested one).
 - Inbox sync (`canvas/collections.ts`): stores thread messages as text; `embedConversationIfNeeded` embeds on first semantic search. Discussions: `ensureDiscussionThread` stores the reply tree when read; `embedDiscussionIfNeeded` embeds on first semantic search.
-- Graph Explorer: the "Index for search" button on a selected file/page/assignment node calls the same `indexDocumentJustInTime`; `getFileChunks(docId)` shows stored chunks in the side panel.
+- Memory sheet: `getFileChunks(docId)` previews a selected node's chunks; "Forget text" calls `forgetDocument(docId)`, which deletes the document's chunks (the vector cache goes with them — forgetting is the one case where kept vectors are dropped on purpose) and sets `total_chunks = 0`, so the row stays a known document and the next search or read re-indexes it from scratch.
 
 ## Extending
 

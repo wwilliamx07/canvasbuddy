@@ -1,5 +1,8 @@
 /**
- * Database schema and DDL migrations for PGlite
+ * Database schema for PGlite. Runs on every start; every statement is idempotent (IF NOT EXISTS),
+ * so a database is created complete on first use and left alone afterwards. There are no
+ * migrations yet — nobody has a database worth carrying forward — so a schema change is made in
+ * the CREATE TABLE and an existing database is reset ("Forget this memory").
  */
 
 export const SCHEMA_SQL = `
@@ -13,12 +16,9 @@ CREATE TABLE IF NOT EXISTS courses (
   course_code   TEXT,
   term          TEXT,
   default_view  TEXT,        -- what "Home" shows: wiki | modules | syllabus | assignments | feed
-  synced_at     TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
-  -- Per-collection sync markers so staleness can be judged even when a collection is empty
-  modules_synced_at     TIMESTAMPTZ,
-  assignments_synced_at TIMESTAMPTZ,
-  files_synced_at       TIMESTAMPTZ,
-  pages_synced_at       TIMESTAMPTZ
+  syllabus_body    TEXT,     -- the Syllabus tab body (raw HTML); the syllabus:<course> document is indexed from it
+  syllabus_version TEXT,     -- fingerprint of syllabus_body (Canvas gives it no timestamp)
+  synced_at     TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );
 
 -- 3. Modules Table
@@ -267,47 +267,6 @@ CREATE TABLE IF NOT EXISTS content_links (
   position  INT NOT NULL,
   PRIMARY KEY (course_id, from_type, from_id, position)
 );
-
--- Migrations for databases created by earlier versions (all idempotent)
-ALTER TABLE courses     ADD COLUMN IF NOT EXISTS default_view TEXT;   -- what "Home" shows: wiki | modules | syllabus | assignments | feed
--- The Syllabus tab's body (raw HTML) and a fingerprint of it; the 'syllabus:<course>' document is indexed from it
-ALTER TABLE courses     ADD COLUMN IF NOT EXISTS syllabus_body    TEXT;
-ALTER TABLE courses     ADD COLUMN IF NOT EXISTS syllabus_version TEXT;
-ALTER TABLE pages       ADD COLUMN IF NOT EXISTS front_page   BOOLEAN NOT NULL DEFAULT FALSE;
-ALTER TABLE courses     ADD COLUMN IF NOT EXISTS modules_synced_at     TIMESTAMPTZ;
-ALTER TABLE courses     ADD COLUMN IF NOT EXISTS assignments_synced_at TIMESTAMPTZ;
-ALTER TABLE courses     ADD COLUMN IF NOT EXISTS files_synced_at       TIMESTAMPTZ;
-ALTER TABLE courses     ADD COLUMN IF NOT EXISTS pages_synced_at       TIMESTAMPTZ;
-ALTER TABLE assignments ADD COLUMN IF NOT EXISTS description TEXT;
-ALTER TABLE assignments ADD COLUMN IF NOT EXISTS updated_at  TEXT;
-ALTER TABLE assignments ADD COLUMN IF NOT EXISTS submission_types    TEXT;
-ALTER TABLE assignments ADD COLUMN IF NOT EXISTS group_name          TEXT;
-ALTER TABLE assignments ADD COLUMN IF NOT EXISTS description_version TEXT;
--- Descriptions synced by earlier versions came from the full listing; treat them as current.
-UPDATE assignments SET description_version = updated_at WHERE description IS NOT NULL AND description_version IS NULL;
-ALTER TABLE files       ADD COLUMN IF NOT EXISTS source_type     TEXT DEFAULT 'file';
-ALTER TABLE files       ADD COLUMN IF NOT EXISTS embedding_model TEXT;
-ALTER TABLE files       ADD COLUMN IF NOT EXISTS html_url        TEXT;
-ALTER TABLE files       ADD COLUMN IF NOT EXISTS content_type    TEXT;
-ALTER TABLE files       ADD COLUMN IF NOT EXISTS size            BIGINT;
-ALTER TABLE files       ALTER COLUMN extracted_at DROP DEFAULT;
-ALTER TABLE file_chunks ADD COLUMN IF NOT EXISTS content_tsv TSVECTOR;
-UPDATE file_chunks SET content_tsv = to_tsvector('english', content) WHERE content_tsv IS NULL;
-ALTER TABLE file_chunks ADD COLUMN IF NOT EXISTS page_end     INT;
-ALTER TABLE file_chunks ADD COLUMN IF NOT EXISTS content_hash TEXT;
-
--- Carry the legacy per-collection stamps on courses into sync_state (columns are kept, unused).
-INSERT INTO sync_state (scope, synced_at, probed_at)
-SELECT 'course:' || course_id || ':' || col, ts, ts FROM (
-  SELECT course_id, 'modules'     AS col, modules_synced_at     AS ts FROM courses UNION ALL
-  SELECT course_id, 'assignments',        assignments_synced_at        FROM courses UNION ALL
-  SELECT course_id, 'files',              files_synced_at              FROM courses UNION ALL
-  SELECT course_id, 'pages',              pages_synced_at              FROM courses
-) legacy WHERE ts IS NOT NULL
-ON CONFLICT (scope) DO NOTHING;
-INSERT INTO sync_state (scope, synced_at, probed_at)
-SELECT 'courses', MAX(synced_at), MAX(synced_at) FROM courses HAVING MAX(synced_at) IS NOT NULL
-ON CONFLICT (scope) DO NOTHING;
 
 -- Indexes for fast traversal and joins
 CREATE INDEX IF NOT EXISTS idx_modules_course ON modules(course_id);

@@ -10,7 +10,7 @@ This folder is the map of the project for developers and agents. Each document c
 | [04-knowledge-graph.md](04-knowledge-graph.md) | PGlite database, schema, graph queries, sync + prune semantics, the freshness engine (`ensureCollection`, `sync_state`, TTLs, probes, unavailable collections) | `src/db/pglite.ts`, `src/db/schema.ts`, `src/db/graph.ts`, `src/canvas/freshness.ts`, `src/canvas/collections.ts` |
 | [05-rag.md](05-rag.md) | Document indexing pipeline, chunking, embeddings, hybrid search | `src/canvas/sync.ts`, `src/db/rag.ts`, `src/embeddings/embeddingClient.ts`, `src/utils/textExtractor.ts` |
 | [06-canvas-api.md](06-canvas-api.md) | How the extension authenticates to Canvas, endpoints used, pagination, response shapes | `src/canvas/http.ts`, `src/canvas/collections.ts`, `src/canvas/sync.ts`, `src/types/canvas.ts` |
-| [07-ui.md](07-ui.md) | React component tree, state ownership, persistence in localStorage, Graph Explorer | `src/components/**`, `src/App.tsx` |
+| [07-ui.md](07-ui.md) | The `AppModel` seam, component tree, connection/chat/memory/settings surfaces, the engine-managed-memory rule, styling | `src/ui/**`, `src/App.tsx` |
 | [08-conventions-and-gotchas.md](08-conventions-and-gotchas.md) | Non-obvious constraints you must know before changing things | — |
 
 ## One-paragraph summary

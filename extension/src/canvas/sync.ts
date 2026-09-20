@@ -1,4 +1,4 @@
-import type { AppSettings } from '../components/Settings/Settings';
+import type { AppSettings } from '../settings';
 import type { CanvasAssignment, CanvasFile, CanvasPage } from '../types/canvas';
 import { setAssignmentDescription, getCourseSyllabus } from '../db/graph';
 import {

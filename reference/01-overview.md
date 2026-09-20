@@ -21,6 +21,7 @@ The constraints above led to a small set of principles that explain most of the 
 - **Shape at the boundary, store thin mirrors.** Canvas payloads are reduced to the fields the app reads before they enter the database; types are deliberately thin. Ids are strings everywhere. Sync is upsert + prune inside one transaction, only ever with a complete list.
 - **Cacheable prompt prefix.** The system prompt and tool schemas are fixed for a session; anything per-turn (the course roster, digests) rides on messages, so provider prompt caching keeps working.
 - **Compact context.** Tool results are capped when persisted, conversations are digested past a threshold, and shaped rows omit anything the model does not need (no HTML bodies in overviews).
+- **Memory is engine-managed.** The user never syncs, refreshes or indexes by hand; the Memory sheet only shows what the agent has remembered and lets the user forget parts of it (a collection, a document's text, everything). Anything forgotten comes back the next time a tool needs it.
 - **Everything is local and per-identity.** One database and chat list per `<host>/<userId>`; settings are global. No server, no telemetry, the API key never leaves the browser except to the chosen provider.
 
 ## Runtime environment
@@ -31,7 +32,7 @@ The constraints above led to a small set of principles that explain most of the 
 | Surface | Side panel (`side_panel.default_path = index.html`) | One panel per browser window. The service worker (`src/background.ts`) does nothing except `setPanelBehavior({ openPanelOnActionClick: true })`. |
 | Permissions | `sidePanel`, `activeTab`, `scripting`; `host_permissions: https://*.utoronto.ca/*` (the known instances); `optional_host_permissions: https://*/*` | Known instances need no prompt. Any other Canvas origin is requested at runtime from the Connect screen (`chrome.permissions.request`, a user gesture) and re-checked on every start. `activeTab` lets the panel read the host of the tab the icon was clicked on and, with `scripting`, run a one-line Canvas signature check in that page before asking for its origin. Persistence uses localStorage and IndexedDB, so no `storage` permission is needed. |
 | CSP | `script-src 'self' 'wasm-unsafe-eval'` | Required for PGlite's WASM. Inline scripts are blocked. |
-| UI | React 19, TypeScript, Tailwind v4 (`@tailwindcss/postcss`), `lucide-react` icons, `marked` for Markdown, `katex` for math | |
+| UI | React 19, TypeScript, Tailwind v4 (`@tailwindcss/postcss`, typography via `@plugin`), `motion` for transitions, `@fontsource-variable/{inter,fraunces}` bundled locally, `lucide-react` icons, `marked` for Markdown, `katex` for math | See `07-ui.md`. |
 | Database | `@electric-sql/pglite` + `@electric-sql/pglite-pgvector`, one database per Canvas identity (`idb://<dbName>` from `canvas/identity.ts`) | Postgres compiled to WASM. See `04-knowledge-graph.md`. |
 | Document parsing | `pdfjs-dist` (worker bundled via `?url` import), `jszip` for PPTX | See `05-rag.md`. |
 | Build | Vite 8 + `vite-plugin-web-extension` | `npm run build` → `extension/dist`, load unpacked. A small custom plugin strips a `__vite-browser-external` chunk that Vite emits for Node shims. `optimizeDeps.exclude` keeps PGlite out of pre-bundling. |
@@ -51,17 +52,19 @@ canvasbuddy/
     └── src/
         ├── main.tsx           ← React root
         ├── background.ts      ← MV3 service worker (side-panel behaviour only)
-        ├── App.tsx            ← agent loop, provider adapters, history/digests, chat state
+        ├── App.tsx            ← agent loop, provider adapters, history/digests, chat + connection state; builds the AppModel
         ├── agent/
         │   ├── prompt.ts      ← SYSTEM_PROMPT
         │   └── tools.ts       ← TOOL_CONFIG + implementations (8 graph-backed tools)
-        ├── components/
-        │   ├── ChatUI/        ← message list + input
-        │   ├── Navigation/    ← left rail: tabs + chat list
-        │   ├── Settings/      ← provider/key/model/threshold form; exports AppSettings; connected-Canvas row
-        │   ├── Connect/       ← first-run screen: inspect the current tab → "Grant access to <host>" → session check
-        │   └── GraphExplorer/ ← knowledge-graph browser, sync + index buttons
-        ├── settings.ts        ← DEFAULT_SETTINGS + normalizeSettings (merges old persisted settings), resolveBaseUrl
+        ├── ui/
+        │   ├── model.ts       ← AppModel: the one type the UI is written against (+ FRESHNESS_FIELDS)
+        │   ├── useMemoryExplorer.ts ← reads the graph into MemoryModel; forget actions
+        │   ├── useConnectFlow.ts    ← tab inspection → "Grant access to <host>" → session check, as ConnectModel
+        │   ├── Shell.tsx      ← header, notice, main area, sheets
+        │   ├── Chat.tsx · Memory.tsx · Settings.tsx · Connect.tsx · primitives.tsx
+        │   ├── theme.css      ← palette/type tokens on .app
+        │   └── format.ts      ← timeAgo, formatDue, syncPill, …
+        ├── settings.ts        ← AppSettings, DEFAULT_SETTINGS + normalizeSettings (merges old persisted settings), resolveBaseUrl
         ├── canvas/
         │   ├── http.ts        ← configureCanvas/canvasHost/canvasBase, canvasGet, fetchAllPages, CanvasHttpError
         │   ├── profiles.ts    ← deployment profiles (quercus, generic): name, internal hosts, origins, prompt intro
@@ -73,7 +76,7 @@ canvasbuddy/
         │   └── sync.ts        ← JIT document indexing (files, pages, assignment descriptions)
         ├── db/
         │   ├── pglite.ts      ← singleton DB init + Web Lock
-        │   ├── schema.ts      ← DDL + idempotent migrations
+        │   ├── schema.ts      ← DDL (idempotent; no migrations)
         │   ├── graph.ts       ← graph queries, upsert/prune, overview text
         │   └── rag.ts         ← chunk storage, hybrid search, document cache state
         ├── embeddings/
@@ -89,7 +92,7 @@ canvasbuddy/
 ## Data flow
 
 ```
- user ──► ChatUI ──► App.tsx agent loop
+ user ──► ui/Chat ──► App.tsx agent loop
                        ├─ buildApiHistory (system prompt · digests · turns; course roster on latest user turn)
                        ├─ callLLM ─────────────────────────────────────►  Gemini / OpenAI
                        ├─ parseFunctionCalls
@@ -101,18 +104,18 @@ canvasbuddy/
                               ├─ db/graph.ts reads ◄───────────┴──────►  PGlite (IndexedDB)
                               └─ db/rag.ts search / read ◄── canvas/sync.ts indexing ──►  Canvas API (documents)
 
- GraphExplorer ──► same ensureCollection / indexing / db functions
+ ui/useMemoryExplorer ──► db/graph.ts, db/rag.ts, sync_state reads only  (+ forgetCollection / forgetDocument)
 ```
 
-Two clients share the same data layer: the **agent** (via tools) and the **Graph Explorer UI** (via direct function calls). Both go through `src/canvas/collections.ts` (`ensureCollection`) for anything that may need a Canvas fetch, and `src/db/*` for reads; neither talks to PGlite SQL directly from the component layer.
+Only the **agent** (via tools) brings data in; Canvas is contacted through `src/canvas/collections.ts` (`ensureCollection`) and documents are indexed through `src/canvas/sync.ts`. The **UI** reads the same `src/db/*` functions to show what is remembered and can only shrink it (forget a collection, a document's text, or everything); it never syncs or indexes. Nothing outside `src/db/*` and `canvas/freshness.ts` talks SQL.
 
 ## Persistence map
 
 | Data | Where | Format |
 |---|---|---|
-| Chats (display messages, model-facing history with capped tool turns, context digests) | `localStorage[<slot.chatsKey>]` — `canvas-buddy-chats` for the first identity seen, `canvas-buddy-chats:<host>/<userId>` after | JSON array of `Chat` |
+| Chats (display messages, model-facing history with capped tool turns, context digests) | `localStorage[<slot.chatsKey>]` = `canvas-buddy-chats:<host>/<userId>` | JSON array of `Chat` |
 | Memory registry (identity → database name, chats key, since) and last identity per host | `localStorage['canvas-buddy-memories']`, `localStorage['canvas-buddy-identity']` | JSON |
 | Settings (provider, key, model, embedding model, threshold, freshness TTLs, `canvasHost`) | `localStorage['canvas-buddy-settings']` | JSON `AppSettings` |
-| Knowledge graph + vectors | IndexedDB via PGlite (`idb://<slot.dbName>`: `canvas-buddy-db` for the first identity, `canvas-buddy-<host>-<userId>` after) | Postgres tables, see `04-knowledge-graph.md` |
+| Knowledge graph + vectors | IndexedDB via PGlite (`idb://<slot.dbName>` = `canvas-buddy-<host>-<userId>`) | Postgres tables, see `04-knowledge-graph.md` |
 
 The API key is stored in plain localStorage; the settings page states it "never leaves the browser", which is true — it is only sent to the chosen LLM provider.

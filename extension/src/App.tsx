@@ -1,20 +1,17 @@
 import { useState, useEffect, useRef } from 'react';
-import { Navigation } from './components/Navigation/Navigation';
-import { ChatUI } from './components/ChatUI/ChatUI';
-import type { Message } from './components/ChatUI/ChatUI';
-import { Settings, type AppSettings } from './components/Settings/Settings';
-import { normalizeSettings, resolveBaseUrl } from './settings';
-import { GraphExplorer } from './components/GraphExplorer/GraphExplorer';
+import { Shell } from './ui/Shell';
+import type { AppModel, Message } from './ui/model';
+import { useConnectFlow } from './ui/useConnectFlow';
+import { useMemoryExplorer } from './ui/useMemoryExplorer';
+import { normalizeSettings, resolveBaseUrl, type AppSettings } from './settings';
 import { getGraphOverviewText } from './db/graph';
 import { buildSystemPrompt } from './agent/prompt';
-import { Connect } from './components/Connect/Connect';
 import { activateCanvas, hasOriginPermission, releaseOriginPermission, findConnectableHost } from './canvas/connection';
 import { resolveIdentity, memorySlotFor, forgetMemory, type MemorySlot } from './canvas/identity';
 import { onSessionLost } from './canvas/http';
 import { configureDatabase, closeDB } from './db/pglite';
 import { profileFor, type CanvasProfile } from './canvas/profiles';
 import { TOOL_CONFIG, toolFunctions, type ToolConfig } from './agent/tools';
-import './App.css';
 
 // ---------------------------------------------------------------------------
 // Conversation model
@@ -51,7 +48,7 @@ const GEMINI_SKIP_SIGNATURE = 'skip_thought_signature_validator';
 
 interface ContextDigest {
   id: string;
-  kind: 'conversation' | 'tool_loop'; // tool_loop digests are legacy (no longer produced) but still valid memory
+  kind: 'conversation';
   content: string;
   createdAt: Date;
   coversUpToIndex?: number; // index into Chat.apiHistory
@@ -417,16 +414,15 @@ function estimateConversationTokens(messages: ConversationMessage[]): number {
 }
 
 function digestToConversationMessage(digest: ContextDigest): ConversationMessage {
-  const label = digest.kind === 'tool_loop' ? 'Tool loop memory' : 'Conversation memory';
   return {
     role: 'system',
-    content: `[${label} | ${digest.createdAt.toISOString()}]\n${digest.content}`,
+    content: `[Conversation memory | ${digest.createdAt.toISOString()}]\n${digest.content}`,
   };
 }
 
 function getConversationCoverageIndex(digests: ContextDigest[]): number {
   return digests.reduce((maxIndex, digest) => {
-    if (digest.kind === 'conversation' && typeof digest.coversUpToIndex === 'number') {
+    if (typeof digest.coversUpToIndex === 'number') {
       return Math.max(maxIndex, digest.coversUpToIndex);
     }
     return maxIndex;
@@ -547,15 +543,10 @@ function capToolResults(message: ConversationMessage): ConversationMessage {
 const SETTINGS_KEY = 'canvas-buddy-settings';
 
 function reviveChat(chat: any): Chat {
-  const messages: Message[] = (chat.messages || []).map((msg: any) => ({ ...msg, timestamp: new Date(msg.timestamp) }));
-  // Chats saved before tool turns were persisted: rebuild the history from the visible messages
-  const apiHistory: ConversationMessage[] = Array.isArray(chat.apiHistory)
-    ? chat.apiHistory
-    : messages.map((m) => ({ role: m.role, content: m.content }));
   return {
     ...chat,
-    messages,
-    apiHistory,
+    messages: (chat.messages || []).map((msg: any) => ({ ...msg, timestamp: new Date(msg.timestamp) })),
+    apiHistory: chat.apiHistory || [],
     createdAt: new Date(chat.createdAt),
     updatedAt: new Date(chat.updatedAt),
     contextDigests: (chat.contextDigests || []).map((digest: any) => ({ ...digest, createdAt: new Date(digest.createdAt) })),
@@ -595,7 +586,6 @@ function describeToolCall(name: string, args: Record<string, any>): string {
 // ---------------------------------------------------------------------------
 
 function App() {
-  const [activeTab, setActiveTab] = useState<'chat' | 'graph' | 'settings'>('chat');
   const [chats, setChats] = useState<Chat[]>([]);
   const [currentChatId, setCurrentChatId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
@@ -755,6 +745,12 @@ function App() {
     autoConnectRef.current = false;
     setCanvasHost('');
   };
+
+  const connect = useConnectFlow(handleConnected, {
+    enabled: connection.status === 'disconnected',
+    initialError: connection.status === 'disconnected' ? connection.reason : undefined,
+  });
+  const memory = useMemoryExplorer(connection.status === 'connected');
 
   // Fixed for the session, so the prompt + tool schemas stay a cacheable prefix
   const systemPrompt = buildSystemPrompt(
@@ -1086,62 +1082,40 @@ function App() {
     } finally {
       abortRef.current = null;
       setIsLoading(false);
+      memory.reload(); // the Memory sheet shows what this turn brought in
     }
   };
 
-  return (
-    <div className="flex h-full w-full bg-gray-900">
-      <Navigation
-        activeTab={activeTab}
-        onTabChange={setActiveTab}
-        chats={chats}
-        currentChatId={currentChatId}
-        onSelectChat={switchChat}
-        onNewChat={createNewChat}
-        onDeleteChat={deleteChat}
-      />
+  // Everything the UI sees; nothing under src/ui reaches past this object
+  const model: AppModel = {
+    chats: chats.map((c) => ({ id: c.id, title: c.title, updatedAt: c.updatedAt })),
+    currentChatId,
+    messages,
+    isLoading,
+    sendMessage: (content) => void handleSendMessage(content),
+    stop: handleStop,
+    newChat: () => void createNewChat(),
+    selectChat: switchChat,
+    deleteChat,
 
-      <main className="flex-1 flex flex-col overflow-hidden h-full">
-        {notice && (
-          <div className="flex items-center justify-between gap-3 px-4 py-2 bg-amber-50 border-b border-amber-200 text-xs text-amber-800 flex-shrink-0">
-            <span>{notice}</span>
-            <button onClick={() => window.location.reload()} className="font-medium underline whitespace-nowrap">
-              Reload
-            </button>
-          </div>
-        )}
-        {activeTab === 'settings' ? (
-          <Settings
-            settings={settings}
-            onSettingsChange={handleSettingsChange}
-            currentContextTokens={currentContextTokens}
-            connection={
-              connection.status === 'connected'
-                ? { host: connection.host, profileName: connection.profile.name, memoryName: connection.memory.name }
-                : null
-            }
-            onDisconnect={handleDisconnect}
-            onForgetMemory={handleForgetMemory}
-          />
-        ) : connection.status === 'checking' ? (
-          <div className="flex-1 flex items-center justify-center bg-gray-50 text-sm text-gray-500">
-            {connection.host ? `Connecting to ${connection.host}…` : 'Loading…'}
-          </div>
-        ) : connection.status === 'disconnected' ? (
-          <Connect initialError={connection.reason} onConnected={handleConnected} />
-        ) : activeTab === 'chat' ? (
-          <ChatUI
-            messages={messages}
-            onSendMessage={handleSendMessage}
-            onStop={handleStop}
-            isLoading={isLoading}
-          />
-        ) : (
-          <GraphExplorer settings={settings} memoryLabel={`${connection.memory.name} · ${connection.host}`} />
-        )}
-      </main>
-    </div>
-  );
+    settings,
+    updateSettings: handleSettingsChange,
+    currentContextTokens,
+
+    connection:
+      connection.status === 'connected'
+        ? { status: 'connected', host: connection.host, profileName: connection.profile.name, memoryName: connection.memory.name }
+        : connection,
+    notice,
+    reload: () => window.location.reload(),
+    connect,
+    disconnect: handleDisconnect,
+    forgetMemory: () => void handleForgetMemory(),
+
+    memory,
+  };
+
+  return <Shell model={model} />;
 }
 
 export default App;

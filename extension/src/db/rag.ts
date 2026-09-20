@@ -444,6 +444,19 @@ export async function getFileChunks(docId: string, pageRange?: { from: number; t
   return res.rows;
 }
 
+/**
+ * Forgets a document's text: its chunks go (the vector cache with them — that is what forgetting
+ * means) and the row stays as a known document with total_chunks = 0, so it is indexed again the
+ * next time a search or read targets it.
+ */
+export async function forgetDocument(docId: string): Promise<void> {
+  await withTransaction(async (tx) => {
+    await tx.query('DELETE FROM file_chunks WHERE file_id = $1', [String(docId)]);
+    await tx.query('UPDATE files SET total_chunks = 0 WHERE file_id = $1', [String(docId)]);
+    await refreshChunkStats(tx);
+  });
+}
+
 /** Highest page/slide number stored for a document (for read_document range hints). */
 export async function getDocumentPageCount(docId: string): Promise<number | null> {
   const db = await getDB();

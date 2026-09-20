@@ -1,5 +1,4 @@
-import type { AppSettings } from '../components/Settings/Settings';
-import { resolveBaseUrl } from '../settings';
+import { resolveBaseUrl, type AppSettings } from '../settings';
 
 /**
  * Retrieval is asymmetric: chunks are embedded as documents, questions as queries.

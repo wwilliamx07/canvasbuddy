@@ -14,7 +14,7 @@ Minimum reading per task:
 | `src/db/*`, `src/canvas/{sync,freshness,collections,http}.ts` | `reference/04-knowledge-graph.md` |
 | indexing, chunking, embeddings, search | `reference/05-rag.md` |
 | Canvas fetches, endpoints, auth | `reference/06-canvas-api.md` |
-| `src/components/*` | `reference/07-ui.md` |
+| `src/ui/*` | `reference/07-ui.md` |
 
 ## Keep the reference true
 
@@ -32,7 +32,9 @@ If a change alters something the reference describes — a tool added/removed/ch
 - Do not change code without the user's confirmation when the change alters the tool contract, the schema, or the system prompt.
 - Do not remove the PGlite Web Lock, the `'wasm-unsafe-eval'` CSP, `optimizeDeps.exclude` for PGlite, or the `?url` pdf.js worker import.
 - Never call a sync/prune function with a partial list.
-- Tools and UI reach Canvas through `ensureCollection` (freshness engine), never by fetching collection data directly. No staleness/"go live" language in the prompt or tool descriptions.
+- Tools reach Canvas through `ensureCollection` (freshness engine), never by fetching collection data directly. No staleness/"go live" language in the prompt or tool descriptions.
+- Memory is engine-managed: nothing under `src/ui` may call `ensureCollection`, a sync, or `indexDocumentJustInTime`. The UI reads the graph and offers only forgetting (`forgetCollection`, `forgetDocument`, forget the whole memory). No sync/refresh/index buttons.
+- The UI is written against `AppModel` (`src/ui/model.ts`); components take the model, never data-layer imports. Extend the model (and the hook that fills it) before a component.
 - Tool implementations return JSON strings and never throw; tool args arrive as strings.
 - SQL lives in `src/db/*`; components and tools call functions.
 

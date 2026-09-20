@@ -1,6 +1,7 @@
-import { getDB } from '../db/pglite';
+import { getDB, withTransaction } from '../db/pglite';
+import { forgetCollectionRows } from '../db/graph';
 import { isUnavailableError } from './http';
-import type { AppSettings } from '../components/Settings/Settings';
+import type { AppSettings } from '../settings';
 
 /**
  * Freshness engine. Every tool reads the local graph; before it does, `ensureCurrent` decides
@@ -204,6 +205,21 @@ async function setSyncState(
 export async function clearSyncState(scopePrefix: string): Promise<void> {
   const db = await getDB();
   await db.query('DELETE FROM sync_state WHERE scope = $1 OR scope LIKE $2', [scopePrefix, `${scopePrefix}:%`]);
+}
+
+/**
+ * Forgets one course collection: its rows go in one transaction, then its sync stamp, so the next
+ * `ensureCollection` for it starts from nothing. The only way the UI changes the graph besides
+ * forgetting the whole memory.
+ */
+export async function forgetCollection(kind: CollectionKind, courseId: string): Promise<void> {
+  const scope = scopeKey(kind, { courseId });
+  await withTransaction(async (tx) => {
+    await forgetCollectionRows(kind, courseId, tx);
+    // Forgetting the pages removes the front page row too; the home stamp would otherwise say it is current
+    const scopes = kind === 'pages' ? [scope, scopeKey('home', { courseId })] : [scope];
+    await tx.query('DELETE FROM sync_state WHERE scope = ANY($1::text[])', [scopes]);
+  });
 }
 
 // ---------------------------------------------------------------------------

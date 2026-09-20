@@ -20,9 +20,6 @@ export interface MemorySlot extends CanvasIdentity {
 
 const LAST_IDENTITY_KEY = 'canvas-buddy-identity';
 const MEMORIES_KEY = 'canvas-buddy-memories';
-/** The names the single-account versions used; the first identity seen adopts them. */
-const LEGACY_DB_NAME = 'canvas-buddy-db';
-const LEGACY_CHATS_KEY = 'canvas-buddy-chats';
 
 function readJson<T>(key: string, fallback: T): T {
   try {
@@ -61,11 +58,7 @@ export function memoryKey(identity: CanvasIdentity): string {
   return `${identity.host}/${identity.userId}`;
 }
 
-/**
- * The memory slot for an identity, created on first sight. IndexedDB databases cannot be renamed,
- * so the first identity this browser ever sees adopts the legacy single-account names (keeping an
- * upgraded user's data); later identities get names derived from host and user id.
- */
+/** The memory slot for an identity, created on first sight; names derive from host and user id. */
 export function memorySlotFor(identity: CanvasIdentity): MemorySlot {
   const registry = readJson<Record<string, MemorySlot>>(MEMORIES_KEY, {});
   const key = memoryKey(identity);
@@ -78,12 +71,11 @@ export function memorySlotFor(identity: CanvasIdentity): MemorySlot {
     }
     return registry[key];
   }
-  const legacyTaken = Object.values(registry).some((s) => s.dbName === LEGACY_DB_NAME);
   const safeHost = identity.host.replace(/[^a-z0-9.-]/gi, '_');
   const slot: MemorySlot = {
     ...identity,
-    dbName: legacyTaken ? `canvas-buddy-${safeHost}-${identity.userId}` : LEGACY_DB_NAME,
-    chatsKey: legacyTaken ? `canvas-buddy-chats:${key}` : LEGACY_CHATS_KEY,
+    dbName: `canvas-buddy-${safeHost}-${identity.userId}`,
+    chatsKey: `canvas-buddy-chats:${key}`,
     since: new Date().toISOString(),
   };
   registry[key] = slot;

@@ -10,7 +10,7 @@ CanvasBuddy is a personal AI agent for Canvas LMS — built on the University of
 - Read specific pages/slides of a document, or a whole message thread, verbatim
 - Show recent announcements, discussion topics (and read their replies), quiz rules (time limit, attempts, availability) and inbox conversations
 - Keep multiple chat threads locally
-- Browse what CanvasBuddy remembers in the **Memory** tab: inspect courses, modules, items and indexed documents; force a refresh; index documents by hand
+- See what CanvasBuddy remembers in the **Memory** sheet: courses, modules, items, documents and when each collection was last checked. Memory fills as you chat and is kept current on its own; you can forget a collection, a document's text, or everything
 
 ## How it works
 

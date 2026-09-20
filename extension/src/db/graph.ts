@@ -1,4 +1,5 @@
 import { getDB, q, type Queryable } from './pglite';
+import type { CollectionKind } from '../canvas/freshness';
 import type {
   CanvasCourse,
   CanvasModule,
@@ -979,6 +980,73 @@ export async function setCourseSyllabus(courseId: string, body: string | null, v
     // A removed syllabus must stop surfacing in search
     await db.query(`DELETE FROM files WHERE file_id = 'syllabus:' || $1`, [String(courseId)]);
     await db.query(`DELETE FROM content_links WHERE course_id = $1 AND from_type = 'syllabus'`, [String(courseId)]);
+  }
+}
+
+/**
+ * Drops everything one collection stored for a course, so the engine fetches it afresh the next
+ * time it is needed. Mirrors what each collection's prune removes when a row disappears
+ * (dependent documents, the links found in their bodies). Files that a link in the course still
+ * names keep their registration and lose only their text, as in the Files-area prune.
+ */
+export async function forgetCollectionRows(kind: CollectionKind, courseId: string, tx?: Queryable): Promise<void> {
+  const db = await q(tx);
+  const c = String(courseId);
+  switch (kind) {
+    case 'modules':
+      await db.query('DELETE FROM modules WHERE course_id = $1', [c]);
+      await pruneOrphanEdges(db);
+      return;
+    case 'assignments':
+      await db.query('DELETE FROM assignments WHERE course_id = $1', [c]);
+      await db.query(`DELETE FROM files WHERE course_id = $1 AND source_type = 'assignment'`, [c]);
+      await db.query(`DELETE FROM content_links WHERE course_id = $1 AND from_type = 'assignment'`, [c]);
+      return;
+    case 'files': {
+      const linked = `file_id IN (SELECT to_ref FROM content_links WHERE course_id = $1 AND to_type = 'file')`;
+      await db.query(`DELETE FROM files WHERE course_id = $1 AND source_type = 'file' AND NOT ${linked}`, [c]);
+      await db.query(
+        `DELETE FROM file_chunks WHERE file_id IN (SELECT file_id FROM files WHERE course_id = $1 AND source_type = 'file' AND ${linked})`,
+        [c]
+      );
+      await db.query(`UPDATE files SET total_chunks = 0 WHERE course_id = $1 AND source_type = 'file' AND ${linked}`, [c]);
+      return;
+    }
+    case 'pages':
+      await db.query('DELETE FROM pages WHERE course_id = $1', [c]);
+      await db.query(`DELETE FROM files WHERE course_id = $1 AND source_type = 'page'`, [c]);
+      await db.query(`DELETE FROM content_links WHERE course_id = $1 AND from_type = 'page'`, [c]);
+      return;
+    case 'home':
+      // The front page stays a page; what "home" added is the flag and the links found on it
+      await db.query(
+        `DELETE FROM content_links WHERE course_id = $1 AND from_type = 'page'
+           AND from_id IN (SELECT page_url FROM pages WHERE course_id = $1 AND front_page)`,
+        [c]
+      );
+      await db.query('UPDATE pages SET front_page = FALSE WHERE course_id = $1 AND front_page', [c]);
+      return;
+    case 'submissions':
+      await db.query('DELETE FROM submissions WHERE course_id = $1', [c]);
+      return;
+    case 'announcements':
+      await db.query('DELETE FROM announcements WHERE course_id = $1', [c]);
+      await db.query(`DELETE FROM content_links WHERE course_id = $1 AND from_type = 'announcement'`, [c]);
+      return;
+    case 'discussions':
+      await db.query('DELETE FROM discussions WHERE course_id = $1', [c]);
+      await db.query(`DELETE FROM files WHERE course_id = $1 AND source_type = 'discussion'`, [c]);
+      await db.query(`DELETE FROM content_links WHERE course_id = $1 AND from_type = 'discussion'`, [c]);
+      return;
+    case 'quizzes':
+      await db.query('DELETE FROM quizzes WHERE course_id = $1', [c]);
+      await db.query(`DELETE FROM content_links WHERE course_id = $1 AND from_type = 'quiz'`, [c]);
+      return;
+    case 'syllabus':
+      await setCourseSyllabus(c, null, null, db);
+      return;
+    default:
+      throw new Error(`${kind} is not a course collection`);
   }
 }
 

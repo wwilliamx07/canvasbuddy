@@ -8,9 +8,9 @@ There is a deliberate split between what the **user sees** and what the **model 
 
 | Type | Purpose | Persisted? |
 |---|---|---|
-| `Message` (`components/ChatUI`) | Display bubbles: `role`, `content`, `timestamp`, plus `activity` (one line per tool call the turn made) and a transient `streaming` flag. | Yes, `Chat.messages` (`streaming` is stripped on save) |
+| `Message` (`ui/model.ts`) | Display bubbles: `role`, `content`, `timestamp`, plus `activity` (one line per tool call the turn made) and a transient `streaming` flag. | Yes, `Chat.messages` (`streaming` is stripped on save) |
 | `ConversationMessage` | The model-facing turn: `role`, `content`, plus structured `toolCalls` / `toolResults` and Gemini `thoughtSignature`s. | Yes, `Chat.apiHistory` (tool results capped at `PERSISTED_TOOL_RESULT_MAX` = 1,500 chars) |
-| `ContextDigest` | Compact memory produced by an LLM summarization call when the history exceeds the threshold; `coversUpToIndex` is an index into `apiHistory`. (`kind: 'tool_loop'` digests are legacy — still replayed, no longer produced.) | Yes, `Chat.contextDigests` |
+| `ContextDigest` | Compact memory produced by an LLM summarization call when the history exceeds the threshold; `coversUpToIndex` is an index into `apiHistory`. | Yes, `Chat.contextDigests` |
 
 `buildApiHistory(apiHistory, digests, courseOverview)` assembles the model-facing history:
 
@@ -19,7 +19,7 @@ There is a deliberate split between what the **user sees** and what the **model 
 3. `apiHistory` after the highest `coversUpToIndex` — real user / assistant / tool-call / tool-result turns.
 4. The course roster (`getGraphOverviewText`) is **prepended to the latest user turn's content**, not put in the system prompt, so the prefix (prompt + tool schemas + digests) stays identical between turns and cacheable by the provider.
 
-Chats saved by older versions have no `apiHistory`; `reviveChat` rebuilds it from the display messages.
+`reviveChat` only revives dates; a chat without `apiHistory` starts with an empty one (there are no compatibility shims for older saved shapes).
 
 ## The turn: `handleSendMessage`
 
@@ -79,7 +79,7 @@ Driven by `settings.contextThreshold` (default 15,000 tokens; ~4 chars/token est
 
 ## Chat persistence
 
-`chats` state is mirrored to `localStorage['canvas-buddy-chats']` on every mutation (`saveCurrentChat`, `createNewChat`, `deleteChat`). On mount, the last chat is selected. Dates are revived from ISO strings. A new chat is titled from its first user message (`chatTitleFor`).
+`chats` state is mirrored to `localStorage[<slot.chatsKey>]` (`canvas-buddy-chats:<host>/<userId>`) on every mutation (`saveCurrentChat`, `createNewChat`, `deleteChat`). On mount, the last chat is selected. Dates are revived from ISO strings. A new chat is titled from its first user message (`chatTitleFor`).
 
 ## Where to look when…
 

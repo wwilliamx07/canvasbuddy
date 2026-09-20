@@ -41,7 +41,7 @@ import {
 } from '../db/rag';
 import { batchEmbed, resolveEmbeddingModel } from '../embeddings/embeddingClient';
 import { htmlToTextWithLinks } from '../utils/canvasLinks';
-import type { AppSettings } from '../components/Settings/Settings';
+import type { AppSettings } from '../settings';
 import type {
   CanvasCourse,
   CanvasTab,

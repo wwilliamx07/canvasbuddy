@@ -1,5 +1,17 @@
-import type { AppSettings } from './components/Settings/Settings';
-import { DEFAULT_FRESHNESS } from './canvas/freshness';
+import { DEFAULT_FRESHNESS, type FreshnessSettings } from './canvas/freshness';
+
+export interface AppSettings {
+  apiKey: string;
+  baseUrl: string;
+  model: string;
+  embeddingModel?: string;
+  llmProvider: 'openai' | 'google';
+  contextThreshold: number;
+  /** Per-collection max ages in minutes; missing keys fall back to DEFAULT_FRESHNESS. */
+  freshness?: Partial<FreshnessSettings>;
+  /** The connected Canvas host ("q.utoronto.ca"); empty until the Connect screen succeeds. */
+  canvasHost?: string;
+}
 
 export const DEFAULT_SETTINGS: AppSettings = {
   apiKey: '',

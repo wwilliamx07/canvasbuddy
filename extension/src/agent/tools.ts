@@ -1,4 +1,4 @@
-import type { AppSettings } from '../components/Settings/Settings';
+import type { AppSettings } from '../settings';
 import {
   ensureCollection,
   ensureCollections,
