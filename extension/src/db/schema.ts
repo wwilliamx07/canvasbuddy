@@ -2,7 +2,7 @@
  * Database schema for PGlite. Runs on every start; every statement is idempotent (IF NOT EXISTS),
  * so a database is created complete on first use and left alone afterwards. There are no
  * migrations yet — nobody has a database worth carrying forward — so a schema change is made in
- * the CREATE TABLE and an existing database is reset ("Forget this memory").
+ * the CREATE TABLE and an existing database is reset ("Forget everything" in the Memory sheet).
  */
 
 export const SCHEMA_SQL = `
