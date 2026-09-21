@@ -10,17 +10,25 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@electric-sql/pglite": "^0.5.8",
+    "@electric-sql/pglite-pgvector": "^0.0.9",
+    "@fontsource-variable/fraunces": "^5.3.0",
+    "@fontsource-variable/inter": "^5.3.0",
     "@tailwindcss/postcss": "^4.2.1",
     "@tailwindcss/typography": "^0.5.15",
+    "dompurify": "^3.4.15",
     "jszip": "^3.10.1",
+    "katex": "^0.18.7",
     "lucide-react": "^0.577.0",
     "marked": "^12.0.2",
+    "motion": "^13.4.0",
     "pdfjs-dist": "^4.1.392",
     "react": "^19.2.4",
     "react-dom": "^19.2.4"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.4",
+    "@types/chrome": "^0.3.0",
     "@types/node": "^24.12.0",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",

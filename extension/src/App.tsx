@@ -1,452 +1,225 @@
-import { useState, useEffect } from 'react';
-import { Navigation } from './components/Navigation/Navigation';
-import { ChatUI } from './components/ChatUI/ChatUI';
-import type { Message } from './components/ChatUI/ChatUI';
-import { Settings, type AppSettings } from './components/Settings/Settings';
-import { extractTextFromFile } from './utils/textExtractor';
-import './App.css';
+import { useState, useEffect, useRef } from 'react';
+import { Shell } from './ui/Shell';
+import type { AppModel, Message } from './ui/model';
+import { useConnectFlow } from './ui/useConnectFlow';
+import { useMemoryExplorer } from './ui/useMemoryExplorer';
+import { normalizeSettings, resolveBaseUrl, type AppSettings } from './settings';
+import { getGraphOverviewText } from './db/graph';
+import { buildSystemPrompt } from './agent/prompt';
+import { activateCanvas, hasOriginPermission, releaseOriginPermission, findConnectableHost } from './canvas/connection';
+import { resolveIdentity, memorySlotFor, forgetMemory, type MemorySlot } from './canvas/identity';
+import { onSessionLost } from './canvas/http';
+import { configureDatabase, closeDB } from './db/pglite';
+import { profileFor, type CanvasProfile } from './canvas/profiles';
+import { TOOL_CONFIG, toolFunctions, type ToolConfig } from './agent/tools';
 
-// Types for chat persistence and compact model memory
+// ---------------------------------------------------------------------------
+// Conversation model
+// ---------------------------------------------------------------------------
+
+interface ToolCall {
+  id: string;
+  name: string;
+  args: Record<string, any>;
+  // Gemini 3 attaches an opaque signature to function-call parts and requires it to be
+  // echoed back verbatim when the turn is replayed in history.
+  thoughtSignature?: string;
+}
+
+interface ToolResult {
+  id: string;
+  name: string;
+  result: string; // JSON string
+}
+
+// A turn in the model-facing history. Tool calls/results are carried as structured fields so
+// each provider gets real function-call turns instead of JSON pasted into a user message.
 interface ConversationMessage {
   role: 'user' | 'assistant' | 'system';
   content: string;
+  toolCalls?: ToolCall[];   // assistant turn that requested tools
+  toolResults?: ToolResult[]; // user/tool turn that answers them
+  thoughtSignature?: string; // Gemini: signature carried on the text part of a model turn
 }
+
+// Gemini rejects replayed function calls that carry no signature (e.g. after a provider switch
+// or when the model omitted one); this documented placeholder tells it to skip the check.
+const GEMINI_SKIP_SIGNATURE = 'skip_thought_signature_validator';
 
 interface ContextDigest {
   id: string;
-  kind: 'conversation' | 'tool_loop';
+  kind: 'conversation';
   content: string;
   createdAt: Date;
-  coversUpToIndex?: number;
+  coversUpToIndex?: number; // index into Chat.apiHistory
 }
 
 interface Chat {
   id: string;
   title: string;
-  messages: Message[]; // Display only - user and assistant messages shown in UI
-  contextDigests: ContextDigest[]; // Compact persistent context memory for the model
+  messages: Message[];               // Display only - user and assistant text shown in UI
+  apiHistory: ConversationMessage[]; // Model-facing turns incl. tool calls/results (capped)
+  contextDigests: ContextDigest[];   // Compact memory for turns that were summarized away
   createdAt: Date;
   updatedAt: Date;
 }
 
-// System prompt for the assistant
-const SYSTEM_PROMPT = `You are a helpful student assistant integrated into Canvas. Your role is to help students manage their courses, assignments, and academic tasks. 
+type Connection =
+  | { status: 'checking'; host?: string }
+  | { status: 'disconnected'; host?: string; reason?: string }
+  | { status: 'connected'; host: string; profile: CanvasProfile; memory: MemorySlot; live: boolean };
 
-When helping students, always:
-1. Retrieve course information before accessing course-specific data
-2. Filter results strategically to provide focused, relevant information
-3. Be concise and organized in presenting information
-4. Guide students through their academic workflow efficiently
+/** Persisted tool results are capped; the model saw the full result within its own turn. */
+const PERSISTED_TOOL_RESULT_MAX = 1500;
+const MAX_TOOL_ROUNDS = 12;
 
-Use the available tools to access Canvas data, retrieve assignment details, check announcements, and help with course planning.`;
+// ---------------------------------------------------------------------------
+// Provider adapters
+// ---------------------------------------------------------------------------
 
-const SYSTEM_PROMPT_MESSAGE: ConversationMessage = {
-  role: 'system',
-  content: SYSTEM_PROMPT,
-};
+type FunctionCall = ToolCall;
 
-// Tool configuration for Google AI API
-interface ToolParameter {
-  type: 'STRING' | 'INTEGER' | 'NUMBER' | 'BOOLEAN';
-  description: string;
-  enum?: string[];
+// Convert the Google-style TOOL_CONFIG to OpenAI's function-tool schema
+function toOpenAITools(tools: ToolConfig[]) {
+  return tools.map((tool) => ({
+    type: 'function',
+    function: {
+      name: tool.name,
+      description: tool.description,
+      parameters: {
+        type: 'object',
+        properties: Object.fromEntries(
+          Object.entries(tool.parameters.properties).map(([key, param]) => [
+            key,
+            {
+              type: param.type.toLowerCase(),
+              description: param.description,
+              ...(param.enum ? { enum: param.enum } : {}),
+            },
+          ])
+        ),
+        required: tool.parameters.required || [],
+      },
+    },
+  }));
 }
 
-interface ToolConfig {
-  name: string;
-  description: string;
-  parameters: {
-    type: 'OBJECT';
-    properties: Record<string, ToolParameter>;
-    required?: string[];
-  };
-}
-
-const TOOL_CONFIG: ToolConfig[] = [
-  {
-    name: 'get_courses',
-    description: 'Retrieve list of courses the student is enrolled in',
-    parameters: {
-      type: 'OBJECT',
-      properties: {
-        per_page: { type: 'INTEGER', description: 'Number of results per page (max 100)' },
-        page: { type: 'INTEGER', description: 'Page number for pagination' },
-        enrollment_state: { type: 'STRING', description: 'Filter by enrollment state', enum: ['active', 'invited', 'completed'] },
-        enrollment_type: { type: 'STRING', description: 'Filter by enrollment type', enum: ['student', 'teacher', 'ta', 'observer'] },
-        include_total_scores: { type: 'BOOLEAN', description: 'Include grade information' },
-        include_term: { type: 'BOOLEAN', description: 'Include term/semester information' },
-        include_course_image: { type: 'BOOLEAN', description: 'Include course banner image' },
-        include_teachers: { type: 'BOOLEAN', description: 'Include instructor information' },
-      },
-    },
-  },
-  {
-    name: 'get_planner_items',
-    description: 'Retrieve upcoming assignments and activities from planner',
-    parameters: {
-      type: 'OBJECT',
-      properties: {
-        start_date: { type: 'STRING', description: 'Start date in ISO 8601 format (e.g., 2026-03-15)' },
-        end_date: { type: 'STRING', description: 'End date in ISO 8601 format' },
-        per_page: { type: 'INTEGER', description: 'Number of results per page (max 100)' },
-        page: { type: 'INTEGER', description: 'Page number for pagination' },
-        filter: { type: 'STRING', description: 'Filter type', enum: ['new_activity'] },
-      },
-    },
-  },
-  {
-    name: 'get_course_assignments',
-    description: 'Retrieve assignments for a specific course',
-    parameters: {
-      type: 'OBJECT',
-      properties: {
-        course_id: { type: 'STRING', description: 'ID of the course' },
-        bucket: { type: 'STRING', description: 'Filter assignments by time bucket', enum: ['upcoming', 'past', 'undated', 'ungraded'] },
-        include_submission: { type: 'BOOLEAN', description: 'Include student submission status' },
-        include_rubric: { type: 'BOOLEAN', description: 'Include rubric assessment' },
-        order_by: { type: 'STRING', description: 'Sort results by field', enum: ['due_at', 'name', 'position'] },
-        per_page: { type: 'INTEGER', description: 'Number of results per page (max 100)' },
-        page: { type: 'INTEGER', description: 'Page number for pagination' },
-      },
-      required: ['course_id'],
-    },
-  },
-  {
-    name: 'get_course_announcements',
-    description: 'Retrieve announcements for a specific course',
-    parameters: {
-      type: 'OBJECT',
-      properties: {
-        course_id: { type: 'STRING', description: 'ID of the course' },
-        order_by: { type: 'STRING', description: 'Sort results by field', enum: ['recent_activity', 'position', 'title'] },
-        scope: { type: 'STRING', description: 'Filter announcements by scope', enum: ['locked', 'unlocked', 'pinned', 'unpinned'] },
-        per_page: { type: 'INTEGER', description: 'Number of results per page (max 100)' },
-        page: { type: 'INTEGER', description: 'Page number for pagination' },
-      },
-      required: ['course_id'],
-    },
-  },
-  {
-    name: 'get_conversations',
-    description: 'Retrieve conversations/messages',
-    parameters: {
-      type: 'OBJECT',
-      properties: {
-        scope: { type: 'STRING', description: 'Filter conversations by scope', enum: ['unread', 'starred', 'archived'] },
-        per_page: { type: 'INTEGER', description: 'Number of results per page (max 100)' },
-        page: { type: 'INTEGER', description: 'Page number for pagination' },
-      },
-    },
-  },
-  {
-    name: 'get_assignment_details',
-    description: 'Retrieve detailed information about a specific assignment',
-    parameters: {
-      type: 'OBJECT',
-      properties: {
-        course_id: { type: 'STRING', description: 'ID of the course' },
-        assignment_id: { type: 'STRING', description: 'ID of the assignment' },
-      },
-      required: ['course_id', 'assignment_id'],
-    },
-  },
-  {
-    name: 'get_course_modules',
-    description: 'Retrieve course modules and their contents',
-    parameters: {
-      type: 'OBJECT',
-      properties: {
-        course_id: { type: 'STRING', description: 'ID of the course' },
-        include_items: { type: 'BOOLEAN', description: 'Include module items in same call' },
-        include_content_details: { type: 'BOOLEAN', description: 'Include file size and dates' },
-        per_page: { type: 'INTEGER', description: 'Number of results per page (max 100)' },
-        page: { type: 'INTEGER', description: 'Page number for pagination' },
-      },
-      required: ['course_id'],
-    },
-  },
-  {
-    name: 'get_module_items',
-    description: 'Retrieve items within a specific course module',
-    parameters: {
-      type: 'OBJECT',
-      properties: {
-        course_id: { type: 'STRING', description: 'ID of the course' },
-        module_id: { type: 'STRING', description: 'ID of the module' },
-        per_page: { type: 'INTEGER', description: 'Number of results per page (max 100)' },
-        page: { type: 'INTEGER', description: 'Page number for pagination' },
-      },
-      required: ['course_id', 'module_id'],
-    },
-  },
-  {
-    name: 'get_file_metadata',
-    description: 'Retrieve metadata about a file',
-    parameters: {
-      type: 'OBJECT',
-      properties: {
-        file_id: { type: 'STRING', description: 'ID of the file' },
-      },
-      required: ['file_id'],
-    },
-  },
-  {
-    name: 'extract_text_from_file',
-    description: 'Extract text content from a file',
-    parameters: {
-      type: 'OBJECT',
-      properties: {
-        file_id: { type: 'STRING', description: 'ID of the file to extract text from' },
-      },
-      required: ['file_id'],
-    },
-  },
-];
-
-// Utility function to build query parameters from tool arguments
-function buildQueryString(args: Record<string, string>): string {
-  const params = new URLSearchParams();
-  
-  for (const [key, value] of Object.entries(args)) {
-    if (value) {
-      // Check if this is an array parameter with multiple values (stored with \x00 separator)
-      if (key.includes('[]') && value.includes('\x00')) {
-        // Split and append each value separately
-        const values = value.split('\x00');
-        for (const v of values) {
-          params.append(key, v);
-        }
-      } else {
-        params.set(key, value);
-      }
-    }
+function parseJsonOrString(text: string): unknown {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return text;
   }
-  
-  const queryString = params.toString();
-  return queryString ? '?' + queryString : '';
 }
 
-// Tool implementation functions with proper origin and credentials
-const toolFunctions: Record<string, (args: Record<string, string>) => Promise<string>> = {
-  get_courses: async (args) => {
-    try {
-      // Provide default values
-      const params = { per_page: '100', ...args };
-      const queryString = buildQueryString(params);
-      const response = await fetch(`https://q.utoronto.ca/api/v1/courses${queryString}`, {
-        credentials: 'include',
-      });
-      const data = await response.json();
-      return JSON.stringify(data);
-    } catch (error) {
-      return JSON.stringify({ error: (error as Error).message });
-    }
-  },
-  get_planner_items: async (args) => {
-    try {
-      const params = { per_page: '100', ...args };
-      const queryString = buildQueryString(params);
-      const response = await fetch(`https://q.utoronto.ca/api/v1/planner/items${queryString}`, {
-        credentials: 'include',
-      });
-      const data = await response.json();
-      return JSON.stringify(data);
-    } catch (error) {
-      return JSON.stringify({ error: (error as Error).message });
-    }
-  },
-  get_course_assignments: async (args: any) => {
-    try {
-      if (!args.course_id) {
-        return JSON.stringify({ error: 'course_id is required' });
+// OpenAI chat format: system/user/assistant(+tool_calls)/tool messages
+function toOpenAIMessages(messages: ConversationMessage[]): any[] {
+  const out: any[] = [];
+  for (const msg of messages) {
+    if (msg.toolResults?.length) {
+      for (const r of msg.toolResults) {
+        out.push({ role: 'tool', tool_call_id: r.id, content: r.result });
       }
-      const params = { per_page: '100', ...args };
-      const courseId = (params as any).course_id;
-      delete (params as any).course_id;
-      const queryString = buildQueryString(params);
-      const response = await fetch(`https://q.utoronto.ca/api/v1/courses/${courseId}/assignments${queryString}`, {
-        credentials: 'include',
-      });
-      const data = await response.json();
-      return JSON.stringify(data);
-    } catch (error) {
-      return JSON.stringify({ error: (error as Error).message });
+      continue;
     }
-  },
-  get_course_announcements: async (args: any) => {
-    try {
-      if (!args.course_id) {
-        return JSON.stringify({ error: 'course_id is required' });
-      }
-      const params = { only_announcements: 'true', per_page: '100', ...args };
-      const courseId = (params as any).course_id;
-      delete (params as any).course_id;
-      const queryString = buildQueryString(params);
-      const response = await fetch(`https://q.utoronto.ca/api/v1/courses/${courseId}/discussion_topics${queryString}`, {
-        credentials: 'include',
+    if (msg.role === 'assistant' && msg.toolCalls?.length) {
+      out.push({
+        role: 'assistant',
+        content: msg.content || null,
+        tool_calls: msg.toolCalls.map((c) => ({
+          id: c.id,
+          type: 'function',
+          function: { name: c.name, arguments: JSON.stringify(c.args) },
+        })),
       });
-      const data = await response.json();
-      return JSON.stringify(data);
-    } catch (error) {
-      return JSON.stringify({ error: (error as Error).message });
+      continue;
     }
-  },
-  get_conversations: async (args) => {
-    try {
-      const params = { per_page: '100', ...args };
-      const queryString = buildQueryString(params);
-      const response = await fetch(`https://q.utoronto.ca/api/v1/conversations${queryString}`, {
-        credentials: 'include',
-      });
-      const data = await response.json();
-      return JSON.stringify(data);
-    } catch (error) {
-      return JSON.stringify({ error: (error as Error).message });
-    }
-  },
-  get_assignment_details: async (args) => {
-    try {
-      if (!args.course_id || !args.assignment_id) {
-        return JSON.stringify({ error: 'course_id and assignment_id are required' });
-      }
-      const response = await fetch(`https://q.utoronto.ca/api/v1/courses/${args.course_id}/assignments/${args.assignment_id}`, {
-        credentials: 'include',
-      });
-      const data = await response.json();
-      return JSON.stringify(data);
-    } catch (error) {
-      return JSON.stringify({ error: (error as Error).message });
-    }
-  },
-  get_course_quizzes: async (args: any) => {
-    try {
-      if (!args.course_id) {
-        return JSON.stringify({ error: 'course_id is required' });
-      }
-      const params = { per_page: '100', ...args };
-      const courseId = (params as any).course_id;
-      delete (params as any).course_id;
-      const queryString = buildQueryString(params);
-      const response = await fetch(`https://q.utoronto.ca/api/v1/courses/${courseId}/quizzes${queryString}`, {
-        credentials: 'include',
-      });
-      const data = await response.json();
-      return JSON.stringify(data);
-    } catch (error) {
-      return JSON.stringify({ error: (error as Error).message });
-    }
-  },
-  get_course_modules: async (args: any) => {
-    try {
-      if (!args.course_id) {
-        return JSON.stringify({ error: 'course_id is required' });
-      }
-      const params = { per_page: '100', ...args };
-      const courseId = (params as any).course_id;
-      delete (params as any).course_id;
-      const queryString = buildQueryString(params);
-      const response = await fetch(`https://q.utoronto.ca/api/v1/courses/${courseId}/modules${queryString}`, {
-        credentials: 'include',
-      });
-      const data = await response.json();
-      return JSON.stringify(data);
-    } catch (error) {
-      return JSON.stringify({ error: (error as Error).message });
-    }
-  },
-  get_module_items: async (args: any) => {
-    try {
-      if (!args.course_id || !args.module_id) {
-        return JSON.stringify({ error: 'course_id and module_id are required' });
-      }
-      const params = { per_page: '100', ...args };
-      const courseId = (params as any).course_id;
-      const moduleId = (params as any).module_id;
-      delete (params as any).course_id;
-      delete (params as any).module_id;
-      const queryString = buildQueryString(params);
-      const response = await fetch(`https://q.utoronto.ca/api/v1/courses/${courseId}/modules/${moduleId}/items${queryString}`, {
-        credentials: 'include',
-      });
-      const data = await response.json();
-      return JSON.stringify(data);
-    } catch (error) {
-      return JSON.stringify({ error: (error as Error).message });
-    }
-  },
-  get_file_metadata: async (args) => {
-    try {
-      if (!args.file_id) {
-        return JSON.stringify({ error: 'file_id is required' });
-      }
-      const response = await fetch(`https://q.utoronto.ca/api/v1/files/${args.file_id}`, {
-        credentials: 'include',
-      });
-      const data = await response.json();
-      return JSON.stringify(data);
-    } catch (error) {
-      return JSON.stringify({ error: (error as Error).message });
-    }
-  },
-  extract_text_from_file: async (args) => {
-    try {
-      if (!args.file_id) {
-        return JSON.stringify({ error: 'file_id is required' });
-      }
-      // First, get the file metadata to get the filename
-      const fileMetadataResponse = await fetch(`https://q.utoronto.ca/api/v1/files/${args.file_id}`, {
-        credentials: 'include',
-      });
-      const fileMetadata = await fileMetadataResponse.json();
-      const fileName = fileMetadata.filename;
+    out.push({ role: msg.role, content: msg.content });
+  }
+  return out;
+}
 
-      // Get the public URL of the file
-      const urlResponse = await fetch(`https://q.utoronto.ca/api/v1/files/${args.file_id}/public_url`, {
-        credentials: 'include',
-      });
-      const urlData = await urlResponse.json();
-      const fileUrl = urlData["public_url"];
+// Gemini format: systemInstruction + contents with text / functionCall / functionResponse parts
+function toGeminiRequest(messages: ConversationMessage[]): { systemInstruction?: any; contents: any[] } {
+  const systemTexts: string[] = [];
+  const contents: any[] = [];
 
-      if (!fileUrl) {
-        return JSON.stringify({ error: 'Unable to get file URL' });
-      }
-
-      // Download the file
-      const fileResponse = await fetch(fileUrl);
-      const fileBuffer = await fileResponse.arrayBuffer();
-
-      // Extract text using local utility
-      const text = await extractTextFromFile(fileBuffer, fileName);
-      return JSON.stringify({ text });
-    } catch (error) {
-      return JSON.stringify({ error: (error as Error).message });
+  for (const msg of messages) {
+    if (msg.role === 'system') {
+      systemTexts.push(msg.content);
+      continue;
     }
-  },
-};
+    if (msg.toolResults?.length) {
+      contents.push({
+        role: 'user',
+        parts: msg.toolResults.map((r) => ({
+          functionResponse: { name: r.name, response: { result: parseJsonOrString(r.result) } },
+        })),
+      });
+      continue;
+    }
+    if (msg.role === 'assistant' && msg.toolCalls?.length) {
+      const parts: any[] = [];
+      if (msg.content) {
+        parts.push({ text: msg.content, ...(msg.thoughtSignature ? { thoughtSignature: msg.thoughtSignature } : {}) });
+      }
+      const anySigned = msg.toolCalls.some((c) => c.thoughtSignature);
+      msg.toolCalls.forEach((c, i) => {
+        const part: any = { functionCall: { name: c.name, args: c.args } };
+        if (c.thoughtSignature) part.thoughtSignature = c.thoughtSignature;
+        else if (!anySigned && i === 0) part.thoughtSignature = GEMINI_SKIP_SIGNATURE;
+        parts.push(part);
+      });
+      contents.push({ role: 'model', parts });
+      continue;
+    }
+    if (msg.role === 'assistant') {
+      contents.push({
+        role: 'model',
+        parts: [{ text: msg.content, ...(msg.thoughtSignature ? { thoughtSignature: msg.thoughtSignature } : {}) }],
+      });
+      continue;
+    }
+    contents.push({ role: 'user', parts: [{ text: msg.content }] });
+  }
 
-// Parse function calls from Google AI response
-interface FunctionCall {
-  name: string;
-  args: Record<string, any>;
+  return {
+    systemInstruction: systemTexts.length ? { parts: [{ text: systemTexts.join('\n\n') }] } : undefined,
+    contents,
+  };
 }
 
 function parseFunctionCalls(responseData: any): FunctionCall[] {
   const functionCalls: FunctionCall[] = [];
-  
-  if (!responseData.candidates || responseData.candidates.length === 0) {
+
+  // OpenAI: choices[0].message.tool_calls[].function.{name, arguments (JSON string)}
+  const openAIToolCalls = responseData?.choices?.[0]?.message?.tool_calls;
+  if (Array.isArray(openAIToolCalls)) {
+    for (const call of openAIToolCalls) {
+      if (call?.function?.name) {
+        let args: Record<string, any> = {};
+        try {
+          args = call.function.arguments ? JSON.parse(call.function.arguments) : {};
+        } catch {
+          args = {};
+        }
+        functionCalls.push({ id: call.id || `call_${functionCalls.length}`, name: call.function.name, args });
+      }
+    }
     return functionCalls;
   }
 
-  const candidate = responseData.candidates[0];
-  if (!candidate.content || !candidate.content.parts) {
-    return functionCalls;
-  }
+  // Google: candidates[0].content.parts[].functionCall
+  const parts = responseData?.candidates?.[0]?.content?.parts;
+  if (!Array.isArray(parts)) return functionCalls;
 
-  for (const part of candidate.content.parts) {
+  for (const part of parts) {
     if (part.functionCall) {
       functionCalls.push({
+        id: part.functionCall.id || `call_${functionCalls.length}`,
         name: part.functionCall.name,
         args: part.functionCall.args || {},
+        ...(part.thoughtSignature ? { thoughtSignature: part.thoughtSignature } : {}),
       });
     }
   }
@@ -454,264 +227,598 @@ function parseFunctionCalls(responseData: any): FunctionCall[] {
   return functionCalls;
 }
 
-// Extract text content from Google AI response
+// Gemini: signature attached to a text part of the model turn (needed when replaying it)
+function extractTextThoughtSignature(responseData: any): string | undefined {
+  const parts = responseData?.candidates?.[0]?.content?.parts;
+  if (!Array.isArray(parts)) return undefined;
+  for (let i = parts.length - 1; i >= 0; i--) {
+    if (parts[i].text && parts[i].thoughtSignature) return parts[i].thoughtSignature;
+  }
+  return undefined;
+}
+
 function extractTextContent(responseData: any): string {
-  if (!responseData.candidates || responseData.candidates.length === 0) {
-    return '';
-  }
-
-  const candidate = responseData.candidates[0];
-  if (!candidate.content || !candidate.content.parts) {
-    return '';
-  }
-
+  const parts = responseData?.candidates?.[0]?.content?.parts;
+  if (!Array.isArray(parts)) return '';
   let output = '';
-  for (const part of candidate.content.parts) {
-    if (part.text) {
-      output += part.text;
-    }
+  for (const part of parts) {
+    if (part.text && !part.thought) output += part.text;
   }
-
   return output;
 }
 
-function estimateTokenCount(text: string): number {
-  if (!text.trim()) {
-    return 0;
+// ---------------------------------------------------------------------------
+// Streaming
+// ---------------------------------------------------------------------------
+
+/**
+ * Yields the `data:` payload of each server-sent event. Both providers stream this way; the
+ * caller decides what a payload means. Events are separated by a blank line and may use CRLF.
+ */
+async function* readSSE(response: Response): AsyncGenerator<string> {
+  if (!response.body) throw new Error('The provider returned no response body to stream.');
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+
+  const dataOf = (event: string): string =>
+    event
+      .split(/\r?\n/)
+      .filter((line) => line.startsWith('data:'))
+      .map((line) => line.slice(5).trimStart())
+      .join('\n');
+
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let match: RegExpExecArray | null;
+      while ((match = /\r?\n\r?\n/.exec(buffer))) {
+        const data = dataOf(buffer.slice(0, match.index));
+        buffer = buffer.slice(match.index + match[0].length);
+        if (data) yield data;
+      }
+    }
+    buffer += decoder.decode();
+    const tail = dataOf(buffer);
+    if (tail) yield tail;
+  } finally {
+    // Leaving early (`[DONE]`, an error) must close the connection, not just drop the lock
+    reader.cancel().catch(() => {});
+  }
+}
+
+function parseSSEJson(data: string): any {
+  try {
+    return JSON.parse(data);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * OpenAI stream → the non-streaming response shape. Text deltas go to `onDelta`; tool calls
+ * arrive as fragments keyed by `index` (id and name first, then argument pieces) and are joined.
+ */
+async function readOpenAIStream(response: Response, onDelta: (text: string) => void): Promise<any> {
+  let content = '';
+  let finishReason: string | undefined;
+  const toolCalls: Array<{ id: string; type: 'function'; function: { name: string; arguments: string } }> = [];
+
+  for await (const data of readSSE(response)) {
+    if (data === '[DONE]') break;
+    const chunk = parseSSEJson(data);
+    if (!chunk) continue;
+    if (chunk.error) throw new Error(chunk.error.message || JSON.stringify(chunk.error));
+    const choice = chunk.choices?.[0];
+    if (!choice) continue;
+    if (choice.finish_reason) finishReason = choice.finish_reason;
+    const delta = choice.delta || {};
+    if (typeof delta.content === 'string' && delta.content) {
+      content += delta.content;
+      onDelta(delta.content);
+    }
+    for (const fragment of delta.tool_calls || []) {
+      const index = typeof fragment.index === 'number' ? fragment.index : toolCalls.length;
+      const call = (toolCalls[index] ||= { id: '', type: 'function', function: { name: '', arguments: '' } });
+      if (fragment.id) call.id = fragment.id;
+      if (fragment.function?.name) call.function.name += fragment.function.name;
+      if (fragment.function?.arguments) call.function.arguments += fragment.function.arguments;
+    }
   }
 
-  return Math.max(1, Math.ceil(text.length / 4));
-}
-
-function estimateConversationTokens(messages: ConversationMessage[]): number {
-  return messages.reduce((total, message) => total + estimateTokenCount(message.content) + 4, 0);
-}
-
-function toConversationMessage(message: Message): ConversationMessage {
+  const tool_calls = toolCalls.filter(Boolean).map((c, i) => ({ ...c, id: c.id || `call_${i}` }));
   return {
-    role: message.role,
-    content: message.content,
+    choices: [{ index: 0, finish_reason: finishReason, message: { role: 'assistant', content, ...(tool_calls.length ? { tool_calls } : {}) } }],
   };
 }
 
+/**
+ * Gemini stream → the non-streaming response shape. Visible text parts are concatenated into one
+ * part; a thought signature seen on any text part (Gemini sends it on the last chunk, sometimes
+ * with empty text) is carried on that merged part, and function-call parts keep their own, so
+ * `parseFunctionCalls` / `extractTextThoughtSignature` and the signature replay work unchanged.
+ */
+async function readGeminiStream(response: Response, onDelta: (text: string) => void): Promise<any> {
+  const parts: any[] = [];
+  let textPart: any = null;
+  let finishReason: string | undefined;
+  let promptFeedback: any;
+
+  for await (const data of readSSE(response)) {
+    const chunk = parseSSEJson(data);
+    if (!chunk) continue;
+    if (chunk.error) throw new Error(chunk.error.message || JSON.stringify(chunk.error));
+    if (chunk.promptFeedback) promptFeedback = chunk.promptFeedback;
+    const candidate = chunk.candidates?.[0];
+    if (!candidate) continue;
+    if (candidate.finishReason) finishReason = candidate.finishReason;
+    for (const part of candidate.content?.parts || []) {
+      if (typeof part.text === 'string' && !part.thought) {
+        if (!textPart) {
+          textPart = { text: '' };
+          parts.push(textPart);
+        }
+        textPart.text += part.text;
+        if (part.thoughtSignature) textPart.thoughtSignature = part.thoughtSignature;
+        if (part.text) onDelta(part.text);
+      } else {
+        parts.push(part);
+      }
+    }
+  }
+
+  return {
+    candidates: [{ index: 0, content: { role: 'model', parts }, ...(finishReason ? { finishReason } : {}) }],
+    ...(promptFeedback ? { promptFeedback } : {}),
+  };
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof DOMException ? error.name === 'AbortError' : (error as any)?.name === 'AbortError';
+}
+
+/** The provider's real error message, not just the HTTP status line. */
+async function readApiError(response: Response): Promise<string> {
+  let detail = '';
+  try {
+    const body = await response.json();
+    detail = body?.error?.message || body?.message || JSON.stringify(body).slice(0, 300);
+  } catch {
+    // no JSON body
+  }
+  return `API error ${response.status} ${response.statusText}${detail ? `: ${detail}` : ''}`;
+}
+
+// ---------------------------------------------------------------------------
+// Context management
+// ---------------------------------------------------------------------------
+
+function estimateTokenCount(text: string): number {
+  if (!text.trim()) return 0;
+  return Math.max(1, Math.ceil(text.length / 4));
+}
+
+function estimateMessageTokens(message: ConversationMessage): number {
+  let tokens = estimateTokenCount(message.content) + 4;
+  for (const call of message.toolCalls || []) tokens += estimateTokenCount(JSON.stringify(call.args)) + 8;
+  for (const res of message.toolResults || []) tokens += estimateTokenCount(res.result) + 8;
+  return tokens;
+}
+
+const TOOL_SCHEMA_TOKENS = estimateTokenCount(JSON.stringify(TOOL_CONFIG));
+
+function estimateConversationTokens(messages: ConversationMessage[]): number {
+  return messages.reduce((total, message) => total + estimateMessageTokens(message), TOOL_SCHEMA_TOKENS);
+}
+
 function digestToConversationMessage(digest: ContextDigest): ConversationMessage {
-  const label = digest.kind === 'tool_loop' ? 'Tool loop memory' : 'Conversation memory';
   return {
     role: 'system',
-    content: `[${label} | ${digest.createdAt.toISOString()}]\n${digest.content}`,
+    content: `[Conversation memory | ${digest.createdAt.toISOString()}]\n${digest.content}`,
   };
 }
 
 function getConversationCoverageIndex(digests: ContextDigest[]): number {
   return digests.reduce((maxIndex, digest) => {
-    if (digest.kind === 'conversation' && typeof digest.coversUpToIndex === 'number') {
+    if (typeof digest.coversUpToIndex === 'number') {
       return Math.max(maxIndex, digest.coversUpToIndex);
     }
-
     return maxIndex;
   }, -1);
 }
 
+/**
+ * Model-facing history: stable prefix (system prompt, digests) → un-digested turns. The course
+ * roster changes between turns, so it is attached to the latest user turn rather than the prompt,
+ * keeping the prefix cacheable.
+ */
 function buildApiHistory(
-  displayMessages: Message[],
+  apiHistory: ConversationMessage[],
   digests: ContextDigest[],
-  transientMessages: ConversationMessage[] = []
+  systemPrompt: string,
+  courseOverview: string | null = null
 ): ConversationMessage[] {
   const orderedDigests = [...digests].sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
   const coveredUpToIndex = getConversationCoverageIndex(orderedDigests);
+  const remaining = apiHistory.slice(coveredUpToIndex + 1).map((m) => ({ ...m }));
+
+  if (courseOverview) {
+    for (let i = remaining.length - 1; i >= 0; i--) {
+      if (remaining[i].role === 'user' && !remaining[i].toolResults) {
+        remaining[i] = { ...remaining[i], content: `${courseOverview}\n\n---\n\n${remaining[i].content}` };
+        break;
+      }
+    }
+  }
 
   return [
-    SYSTEM_PROMPT_MESSAGE,
+    { role: 'system', content: systemPrompt },
     ...orderedDigests.map(digestToConversationMessage),
-    ...displayMessages.slice(coveredUpToIndex + 1).map(toConversationMessage),
-    ...transientMessages,
+    ...remaining,
   ];
 }
 
-function takeMessagesByTokenBudget(messages: Message[], tokenBudget: number): Message[] {
-  const selected: Message[] = [];
+/**
+ * Oldest turns up to a token budget, never splitting an assistant tool-call turn from the
+ * tool-result turn that answers it (providers reject orphaned tool results).
+ */
+function takeMessagesByTokenBudget(messages: ConversationMessage[], tokenBudget: number): ConversationMessage[] {
+  const selected: ConversationMessage[] = [];
   let totalTokens = 0;
 
-  for (const message of messages) {
-    const messageTokens = estimateTokenCount(message.content);
-    if (selected.length > 0 && totalTokens + messageTokens > tokenBudget) {
-      break;
-    }
-
+  for (let i = 0; i < messages.length; i++) {
+    const message = messages[i];
+    const messageTokens = estimateMessageTokens(message);
+    const mustInclude = selected.length > 0 && Boolean(selected[selected.length - 1].toolCalls?.length) && Boolean(message.toolResults?.length);
+    if (!mustInclude && selected.length > 0 && totalTokens + messageTokens > tokenBudget) break;
     selected.push(message);
     totalTokens += messageTokens;
   }
 
+  // Never end on an assistant turn that is waiting for tool results
+  while (selected.length > 0 && selected[selected.length - 1].toolCalls?.length && selected.length < messages.length) {
+    selected.push(messages[selected.length]);
+  }
   return selected;
 }
+
+interface CallOptions {
+  includeTools?: boolean;       // default true
+  onDelta?: (text: string) => void; // when set, the provider's streaming endpoint is used
+  signal?: AbortSignal;
+}
+type CallLLM = (messages: ConversationMessage[], settings: AppSettings, options?: CallOptions) => Promise<{ text: string; rawResponse: any }>;
 
 async function generateDigestText(
   transcript: ConversationMessage[],
   settings: AppSettings,
-  callLLMFn: (messages: ConversationMessage[], settings: AppSettings, includeTools?: boolean) => Promise<{ text: string; rawResponse: any }>,
-  kind: 'conversation' | 'tool_loop'
+  callLLMFn: CallLLM
 ): Promise<string> {
-  const prompt = kind === 'tool_loop'
-    ? 'Summarize what was learned from this tool-call loop. Return only a compact persistent memory digest. Focus on durable facts, discovered course structure, relevant locations, and next steps. Do not repeat raw tool payloads.'
-    : 'Summarize this conversation segment into a compact persistent memory digest. Preserve durable facts, decisions, user preferences, course structure, and unresolved tasks. Do not repeat raw text or verbose detail.';
+  const prompt =
+    'Summarize this conversation segment into a compact persistent memory digest. Preserve durable facts (course ids, assignment/file names and ids, due dates, grades), decisions, user preferences, and unresolved tasks. Do not repeat raw text or tool payloads.';
+
+  // Tool turns are flattened to text so the digest request is plain user/assistant turns; the
+  // instruction goes last as a user turn because Gemini rejects requests ending on a model turn.
+  const flattened: ConversationMessage[] = transcript.map((m) => {
+    if (m.toolResults?.length) {
+      return { role: 'user', content: m.toolResults.map((r) => `[${r.name} result] ${r.result}`).join('\n') };
+    }
+    if (m.toolCalls?.length) {
+      return { role: 'assistant', content: `${m.content ? m.content + '\n' : ''}[called ${m.toolCalls.map((c) => `${c.name}(${JSON.stringify(c.args)})`).join(', ')}]` };
+    }
+    return { role: m.role, content: m.content };
+  });
 
   const response = await callLLMFn(
     [
-      { role: 'system', content: prompt },
-      ...transcript,
+      { role: 'system', content: 'You are a memory compaction step for a Canvas student-assistant agent. Reply with the digest only.' },
+      ...flattened,
+      { role: 'user', content: prompt },
     ],
     settings,
-    false
+    { includeTools: false }
   );
 
   return response.text.trim();
 }
 
-// Clean up temporary tool results from history before saving (they're only needed during API calls)
-// function cleanupToolResults(history: ConversationMessage[]): ConversationMessage[] {
-//   return history.filter(msg => !(msg.role === 'user' && msg.content.startsWith('Tool results:')));
-// }
+function capToolResults(message: ConversationMessage): ConversationMessage {
+  if (!message.toolResults?.length) return message;
+  return {
+    ...message,
+    toolResults: message.toolResults.map((r) =>
+      r.result.length > PERSISTED_TOOL_RESULT_MAX
+        ? { ...r, result: r.result.slice(0, PERSISTED_TOOL_RESULT_MAX) + '…[truncated]' }
+        : r
+    ),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Persistence
+// ---------------------------------------------------------------------------
+
+const SETTINGS_KEY = 'canvas-buddy-settings';
+
+function reviveChat(chat: any): Chat {
+  return {
+    ...chat,
+    messages: (chat.messages || []).map((msg: any) => ({ ...msg, timestamp: new Date(msg.timestamp) })),
+    apiHistory: chat.apiHistory || [],
+    createdAt: new Date(chat.createdAt),
+    updatedAt: new Date(chat.updatedAt),
+    contextDigests: (chat.contextDigests || []).map((digest: any) => ({ ...digest, createdAt: new Date(digest.createdAt) })),
+  };
+}
+
+function chatTitleFor(content: string): string {
+  const firstLine = content.trim().split('\n')[0];
+  return firstLine.length > 48 ? firstLine.slice(0, 47) + '…' : firstLine || 'New chat';
+}
+
+/** One line of tool activity for the chat bubble, from the call the model made. */
+function describeToolCall(name: string, args: Record<string, any>): string {
+  const q = (s: unknown) => (typeof s === 'string' && s.trim() ? ` "${s.trim()}"` : '');
+  switch (name) {
+    case 'list_content':
+      return `Listing ${args.kind || 'content'}${q(args.search)}`;
+    case 'get_assignment':
+      return 'Reading an assignment';
+    case 'search_documents':
+      return `Searching ${args.document_id ? 'the document' : 'documents'} for${q(args.query)}`;
+    case 'read_document':
+      return `Reading ${args.document_type || 'document'}${args.pages ? ` pages ${args.pages}` : ''}`;
+    case 'get_announcements':
+      return 'Checking announcements';
+    case 'get_planner':
+      return 'Checking the planner';
+    case 'get_inbox':
+      return `Checking the inbox${q(args.search)}`;
+    default:
+      return `Running ${name}`;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// App
+// ---------------------------------------------------------------------------
 
 function App() {
-  const [activeTab, setActiveTab] = useState<'chat' | 'settings'>('chat');
   const [chats, setChats] = useState<Chat[]>([]);
   const [currentChatId, setCurrentChatId] = useState<string | null>(null);
-  const [messages, setMessages] = useState<Message[]>([]); // Display messages only
-  const [contextDigests, setContextDigests] = useState<ContextDigest[]>([]); // Compact persistent memory only
+  const [messages, setMessages] = useState<Message[]>([]);
+  const [apiHistory, setApiHistory] = useState<ConversationMessage[]>([]);
+  const [contextDigests, setContextDigests] = useState<ContextDigest[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [currentContextTokens, setCurrentContextTokens] = useState(0);
-  const [settings, setSettings] = useState<AppSettings>({
-    apiKey: '',
-    baseUrl: '',
-    model: 'gemini-3.1-flash-lite-preview',
-    llmProvider: 'google',
-    contextThreshold: 15000,
-  });
+  const [settings, setSettings] = useState<AppSettings>(() => normalizeSettings(null));
+  const [settingsLoaded, setSettingsLoaded] = useState(false);
+  const [connection, setConnection] = useState<Connection>({ status: 'checking' });
+  const [notice, setNotice] = useState<string | null>(null);
+  const [connectNonce, setConnectNonce] = useState(0); // bumps on Connect so the same host re-resolves
+  // Known instances are granted in the manifest, so Disconnect cannot release them; it just stops
+  // auto-connecting for this session so the user can pick another Canvas.
+  const autoConnectRef = useRef(true);
+  // Chats live under the connected identity's key (canvas/identity.ts), known only once connected
+  const chatsKeyRef = useRef<string | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
 
-  // Load chats from localStorage on mount
-  useEffect(() => {
-    const savedChats = localStorage.getItem('canvas-buddy-chats');
-    if (savedChats) {
-      try {
-        const parsed: Chat[] = JSON.parse(savedChats).map((chat: any) => ({
-          ...chat,
-          createdAt: new Date(chat.createdAt),
-          updatedAt: new Date(chat.updatedAt),
-          messages: chat.messages.map((msg: any) => ({
-            ...msg,
-            timestamp: new Date(msg.timestamp),
-          })),
-          contextDigests: (chat.contextDigests || []).map((digest: any) => ({
-            ...digest,
-            createdAt: new Date(digest.createdAt),
-          })),
-        }));
-        setChats(parsed);
-        if (parsed.length > 0) {
-          const lastChat = parsed[parsed.length - 1];
-          setCurrentChatId(lastChat.id);
-          setMessages(lastChat.messages);
-          setContextDigests(lastChat.contextDigests || []);
-        }
+  const loadChatIntoView = (chat: Chat | null) => {
+    setCurrentChatId(chat?.id ?? null);
+    setMessages(chat?.messages ?? []);
+    setApiHistory(chat?.apiHistory ?? []);
+    setContextDigests(chat?.contextDigests ?? []);
+  };
 
-        // Rewrite persisted chats without legacy raw conversation history.
-        localStorage.setItem('canvas-buddy-chats', JSON.stringify(parsed));
-      } catch (error) {
-        console.error('Failed to load chats:', error);
-      }
+  const loadChats = (key: string) => {
+    chatsKeyRef.current = key;
+    let parsed: Chat[] = [];
+    try {
+      const saved = localStorage.getItem(key);
+      if (saved) parsed = JSON.parse(saved).map(reviveChat);
+    } catch (error) {
+      console.error('Failed to load chats:', error);
     }
+    setChats(parsed);
+    loadChatIntoView(parsed.length > 0 ? parsed[parsed.length - 1] : null);
+  };
 
-    // Load settings from localStorage
-    const savedSettings = localStorage.getItem('canvas-buddy-settings');
+  const persistChats = (updated: Chat[]) => {
+    if (chatsKeyRef.current) localStorage.setItem(chatsKeyRef.current, JSON.stringify(updated));
+  };
+
+  useEffect(() => {
+    const savedSettings = localStorage.getItem(SETTINGS_KEY);
     if (savedSettings) {
       try {
-        const parsed = JSON.parse(savedSettings);
-        setSettings({
-          apiKey: '',
-          baseUrl: '',
-          model: 'gemini-3.1-flash-lite-preview',
-          llmProvider: 'google',
-          contextThreshold: 15000,
-          ...parsed,
-        });
+        setSettings(normalizeSettings(JSON.parse(savedSettings)));
       } catch (error) {
         console.error('Failed to load settings:', error);
       }
     }
+    setSettingsLoaded(true);
   }, []);
 
-  // Save current chat to localStorage
-  const saveCurrentChat = (chatId: string, msgs: Message[], digests: ContextDigest[]) => {
+  // The origin permission is optional and Chrome can revoke it, so a remembered host is
+  // re-checked on every start; the Connect screen comes back whenever it is missing.
+  useEffect(() => {
+    if (!settingsLoaded) return;
+    const host = settings.canvasHost;
+    let cancelled = false;
+    if (!host) {
+      chatsKeyRef.current = null;
+      setChats([]);
+      loadChatIntoView(null);
+      if (!autoConnectRef.current) {
+        setConnection({ status: 'disconnected' });
+        return;
+      }
+      // No remembered host: connect silently to the tab's Canvas or a known instance if possible
+      setConnection({ status: 'checking' });
+      findConnectableHost().then(({ host: found, tabHost }) => {
+        if (cancelled) return;
+        if (found) setCanvasHost(found);
+        else setConnection({ status: 'disconnected', host: tabHost ?? undefined });
+      });
+      return () => {
+        cancelled = true;
+      };
+    }
+    setConnection({ status: 'checking', host });
+    (async () => {
+      if (!(await hasOriginPermission(host))) return { status: 'disconnected', host } as Connection;
+      const profile = activateCanvas(host);
+      const resolved = await resolveIdentity(host);
+      if (!resolved) return { status: 'disconnected', host, reason: `Not signed in to ${host}. Sign in there, then connect again.` } as Connection;
+      const memory = memorySlotFor(resolved.identity);
+      configureDatabase(memory.dbName);
+      return { status: 'connected', host, profile, memory, live: resolved.live } as Connection;
+    })()
+      .then((next) => {
+        if (cancelled) return;
+        if (next.status === 'connected') {
+          loadChats(next.memory.chatsKey);
+          setNotice(next.live ? null : `Not signed in to ${host}; showing what's remembered for ${next.memory.name}.`);
+        }
+        setConnection(next);
+      })
+      .catch((e) => {
+        if (!cancelled) setConnection({ status: 'disconnected', host, reason: e instanceof Error ? e.message : String(e) });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [settingsLoaded, settings.canvasHost, connectNonce]);
+
+  // A sign-in page mid-session means the session ended or another account signed in. The
+  // database stays that of the identity it was opened for; a different account is never mixed in.
+  useEffect(() => {
+    if (connection.status !== 'connected') {
+      onSessionLost(null);
+      return;
+    }
+    const { host, memory } = connection;
+    let checking = false;
+    onSessionLost(() => {
+      if (checking) return;
+      checking = true;
+      resolveIdentity(host)
+        .then((resolved) => {
+          if (!resolved || !resolved.live) setNotice(`Not signed in to ${host}; showing what's remembered for ${memory.name}.`);
+          else if (resolved.identity.userId !== memory.userId) setNotice(`Signed in as ${resolved.identity.name}. Reload to switch memory.`);
+        })
+        .finally(() => {
+          checking = false;
+        });
+    });
+    return () => onSessionLost(null);
+  }, [connection]);
+
+  const setCanvasHost = (host: string) => {
+    setSettings((prev) => {
+      const next = { ...prev, canvasHost: host };
+      localStorage.setItem(SETTINGS_KEY, JSON.stringify(next));
+      return next;
+    });
+  };
+
+  const handleConnected = (host: string) => {
+    // The effect above resolves the identity and opens its memory
+    autoConnectRef.current = true;
+    setCanvasHost(host);
+    setConnectNonce((n) => n + 1);
+  };
+
+  const handleDeleteAccountData = async () => {
+    if (connection.status !== 'connected') return;
+    const { memory } = connection;
+    if (!window.confirm(`Delete everything CanvasBuddy has for ${memory.name} (${memory.host})? Courses, documents and chats for this account will be removed from this browser.`)) return;
+    await closeDB();
+    await forgetMemory(memory);
+    window.location.reload();
+  };
+
+  const handleDisconnect = () => {
+    if (connection.status === 'connected') void releaseOriginPermission(connection.host);
+    autoConnectRef.current = false;
+    setCanvasHost('');
+  };
+
+  const connect = useConnectFlow(handleConnected, {
+    enabled: connection.status === 'disconnected',
+    initialError: connection.status === 'disconnected' ? connection.reason : undefined,
+  });
+  const memory = useMemoryExplorer(connection.status === 'connected');
+
+  // Fixed for the session, so the prompt + tool schemas stay a cacheable prefix
+  const systemPrompt = buildSystemPrompt(
+    connection.status === 'connected' ? connection.profile.promptIntro(connection.host) : profileFor('').promptIntro('')
+  );
+
+  const saveCurrentChat = (
+    chatId: string,
+    msgs: Message[],
+    history: ConversationMessage[],
+    digests: ContextDigest[]
+  ) => {
     setChats((prevChats) => {
       const updated = prevChats.map((chat) =>
         chat.id === chatId
-          ? { ...chat, messages: msgs, contextDigests: digests, updatedAt: new Date() }
+          ? {
+              ...chat,
+              title: chat.title.startsWith('Chat ') || chat.title === 'New chat'
+                ? chatTitleFor(msgs.find((m) => m.role === 'user')?.content || chat.title)
+                : chat.title,
+              messages: msgs.map(({ streaming: _streaming, ...m }) => m),
+              apiHistory: history,
+              contextDigests: digests,
+              updatedAt: new Date(),
+            }
           : chat
       );
-      localStorage.setItem('canvas-buddy-chats', JSON.stringify(updated));
+      persistChats(updated);
       return updated;
     });
   };
 
-  // Create a new chat
   const createNewChat = (): string => {
     const newChatId = Date.now().toString();
     const newChat: Chat = {
       id: newChatId,
-      title: `Chat ${new Date().toLocaleString()}`,
+      title: 'New chat',
       messages: [],
+      apiHistory: [],
       contextDigests: [],
       createdAt: new Date(),
       updatedAt: new Date(),
     };
     setChats((prevChats) => {
       const updated = [...prevChats, newChat];
-      localStorage.setItem('canvas-buddy-chats', JSON.stringify(updated));
+      persistChats(updated);
       return updated;
     });
-    setCurrentChatId(newChatId);
-    setMessages([]);
-    setContextDigests([]);
+    loadChatIntoView(newChat);
     return newChatId;
   };
 
-  // Switch to a different chat
   const switchChat = (chatId: string) => {
-    if (currentChatId) {
-      saveCurrentChat(currentChatId, messages, contextDigests);
-    }
+    if (currentChatId) saveCurrentChat(currentChatId, messages, apiHistory, contextDigests);
     const chat = chats.find((c) => c.id === chatId);
-    if (chat) {
-      setCurrentChatId(chatId);
-      setMessages(chat.messages);
-      setContextDigests(chat.contextDigests || []);
-    }
+    if (chat) loadChatIntoView(chat);
   };
 
-  // Delete a chat
   const deleteChat = (chatId: string) => {
     const updated = chats.filter((c) => c.id !== chatId);
     setChats(updated);
-    localStorage.setItem('canvas-buddy-chats', JSON.stringify(updated));
-
-    if (currentChatId === chatId) {
-      if (updated.length > 0) {
-        const lastChat = updated[updated.length - 1];
-        setCurrentChatId(lastChat.id);
-        setMessages(lastChat.messages);
-        setContextDigests(lastChat.contextDigests || []);
-      } else {
-        setCurrentChatId(null);
-        setMessages([]);
-        setContextDigests([]);
-      }
-    }
+    persistChats(updated);
+    if (currentChatId === chatId) loadChatIntoView(updated.length > 0 ? updated[updated.length - 1] : null);
   };
 
-  // Handle settings change
   const handleSettingsChange = (newSettings: AppSettings) => {
     setSettings(newSettings);
-    localStorage.setItem('canvas-buddy-settings', JSON.stringify(newSettings));
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify(newSettings));
   };
 
   useEffect(() => {
@@ -719,20 +826,14 @@ function App() {
       setCurrentContextTokens(0);
       return;
     }
+    setCurrentContextTokens(estimateConversationTokens(buildApiHistory(apiHistory, contextDigests, systemPrompt)));
+  }, [apiHistory, contextDigests, currentChatId, settings.contextThreshold, systemPrompt]);
 
-    const apiHistory = buildApiHistory(messages, contextDigests);
-    setCurrentContextTokens(estimateConversationTokens(apiHistory));
-  }, [messages, contextDigests, currentChatId, settings.contextThreshold]);
+  const callLLM: CallLLM = async (history, settings, options = {}) => {
+    const { includeTools = true, onDelta, signal } = options;
 
-  // Call LLM API with support for both OpenAI and Google AI
-  const callLLM = async (
-    messages: ConversationMessage[],
-    settings: AppSettings,
-    includeTools: boolean = true
-  ): Promise<{ text: string; rawResponse: any }> => {
     if (settings.llmProvider === 'openai') {
-      // OpenAI API call
-      const response = await fetch(`${settings.baseUrl}/chat/completions`, {
+      const response = await fetch(`${resolveBaseUrl(settings)}/chat/completions`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -740,101 +841,72 @@ function App() {
         },
         body: JSON.stringify({
           model: settings.model,
-          messages: messages,
-          max_tokens: 2000,
+          messages: toOpenAIMessages(history),
+          max_completion_tokens: 2000,
+          ...(includeTools && TOOL_CONFIG.length > 0 ? { tools: toOpenAITools(TOOL_CONFIG) } : {}),
+          ...(onDelta ? { stream: true } : {}),
         }),
+        signal,
       });
+      if (!response.ok) throw new Error(await readApiError(response));
+      const data = onDelta ? await readOpenAIStream(response, onDelta) : await response.json();
+      return { text: data.choices?.[0]?.message?.content || '', rawResponse: data };
+    }
 
-      if (!response.ok) {
-        throw new Error(`API Error: ${response.statusText}`);
-      }
-
-      const data = await response.json();
-      return {
-        text: data.choices[0].message.content || '',
-        rawResponse: data,
-      };
-    } else if (settings.llmProvider === 'google') {
-      // Google AI API call with tool support
+    if (settings.llmProvider === 'google') {
+      const { systemInstruction, contents } = toGeminiRequest(history);
       const requestBody: any = {
-        contents: messages.map((msg) => ({
-          role: msg.role === 'user' ? 'user' : msg.role === 'assistant' ? 'model' : 'user',
-          parts: [{ text: msg.content }],
-        })),
-        generationConfig: {
-          maxOutputTokens: 2000,
-        },
+        ...(systemInstruction ? { systemInstruction } : {}),
+        contents,
+        generationConfig: { maxOutputTokens: 2000 },
       };
-
-      // Include tools configuration for Google AI
       if (includeTools && TOOL_CONFIG.length > 0) {
-        requestBody.tools = [
-          {
-            functionDeclarations: TOOL_CONFIG,
-          },
-        ];
+        requestBody.tools = [{ functionDeclarations: TOOL_CONFIG }];
       }
 
+      const method = onDelta ? 'streamGenerateContent?alt=sse' : 'generateContent';
       const response = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/${settings.model}:generateContent?key=${settings.apiKey}`,
+        `${resolveBaseUrl(settings)}/models/${settings.model}:${method}`,
         {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
+          headers: { 'Content-Type': 'application/json', 'x-goog-api-key': settings.apiKey },
           body: JSON.stringify(requestBody),
+          signal,
         }
       );
-
-      if (!response.ok) {
-        throw new Error(`API Error: ${response.statusText}`);
+      if (!response.ok) throw new Error(await readApiError(response));
+      const data = onDelta ? await readGeminiStream(response, onDelta) : await response.json();
+      const text = extractTextContent(data);
+      const finishReason = data?.candidates?.[0]?.finishReason;
+      const blocked = data?.promptFeedback?.blockReason;
+      if (!text && parseFunctionCalls(data).length === 0 && (blocked || (finishReason && finishReason !== 'STOP'))) {
+        throw new Error(`The model returned no answer (${blocked ? `blocked: ${blocked}` : `finish reason: ${finishReason}`}).`);
       }
-
-      const data = await response.json();
-      const textContent = extractTextContent(data);
-      
-      return {
-        text: textContent,
-        rawResponse: data,
-      };
-    } else {
-      throw new Error('Unknown LLM provider');
+      return { text, rawResponse: data };
     }
+
+    throw new Error('Unknown LLM provider');
   };
 
+  /** Summarize the oldest un-digested turns until the estimated history fits the threshold. */
   const ensureContextWithinThreshold = async (
-    displayMessages: Message[],
+    history: ConversationMessage[],
     digests: ContextDigest[]
   ): Promise<ContextDigest[]> => {
     let nextDigests = [...digests];
-    let apiHistory = buildApiHistory(displayMessages, nextDigests);
-    let estimatedTokens = estimateConversationTokens(apiHistory);
+    let estimatedTokens = estimateConversationTokens(buildApiHistory(history, nextDigests, systemPrompt));
 
     while (estimatedTokens > settings.contextThreshold) {
       const coveredUpToIndex = getConversationCoverageIndex(nextDigests);
-      const remainingMessages = displayMessages.slice(coveredUpToIndex + 1);
-
-      if (remainingMessages.length === 0) {
-        break;
-      }
+      const remaining = history.slice(coveredUpToIndex + 1);
+      if (remaining.length <= 1) break; // keep at least the latest turn verbatim
 
       const sliceBudget = Math.max(1000, Math.floor(settings.contextThreshold * 0.25));
-      const messagesToDigest = takeMessagesByTokenBudget(remainingMessages, sliceBudget);
+      const toDigest = takeMessagesByTokenBudget(remaining.slice(0, -1), sliceBudget);
+      if (toDigest.length === 0) break;
 
-      if (messagesToDigest.length === 0) {
-        break;
-      }
-
-      const digestText = await generateDigestText(
-        messagesToDigest.map(toConversationMessage),
-        settings,
-        callLLM,
-        'conversation'
-      );
-
-      if (!digestText) {
-        break;
-      }
+      const digestText = await generateDigestText(toDigest, settings, callLLM);
+      if (!digestText) break;
 
       nextDigests = [
         ...nextDigests,
@@ -843,199 +915,207 @@ function App() {
           kind: 'conversation',
           content: digestText,
           createdAt: new Date(),
-          coversUpToIndex: coveredUpToIndex + messagesToDigest.length,
+          coversUpToIndex: coveredUpToIndex + toDigest.length,
         },
       ];
-
-      apiHistory = buildApiHistory(displayMessages, nextDigests);
-      estimatedTokens = estimateConversationTokens(apiHistory);
+      estimatedTokens = estimateConversationTokens(buildApiHistory(history, nextDigests, systemPrompt));
     }
 
     return nextDigests;
   };
 
-  // Chat handlers
+  const handleStop = () => abortRef.current?.abort();
+
   const handleSendMessage = async (content: string) => {
     const hadActiveChat = Boolean(currentChatId);
     const activeChatId = hadActiveChat ? currentChatId! : createNewChat();
     const baseMessages = hadActiveChat ? messages : [];
+    const baseHistory = hadActiveChat ? apiHistory : [];
     const baseDigests = hadActiveChat ? contextDigests : [];
 
-    // Create user message for display
-    const userMessage: Message = {
-      id: Date.now().toString(),
-      role: 'user',
-      content,
-      timestamp: new Date(),
-    };
-
+    const userMessage: Message = { id: Date.now().toString(), role: 'user', content, timestamp: new Date() };
     let currentMessages = [...baseMessages, userMessage];
-    setMessages(currentMessages);
-
+    let currentHistory: ConversationMessage[] = [...baseHistory, { role: 'user', content }];
     let currentDigests = [...baseDigests];
-    currentDigests = await ensureContextWithinThreshold(currentMessages, currentDigests);
-    setContextDigests(currentDigests);
 
-    saveCurrentChat(activeChatId, currentMessages, currentDigests);
+    setMessages(currentMessages);
+    setApiHistory(currentHistory);
     setIsLoading(true);
 
+    const abort = new AbortController();
+    abortRef.current = abort;
+    const { signal } = abort;
+
+    // Text of the model turn in flight, kept until that turn is appended to the history so an
+    // interrupted turn can still be shown (and remembered) as far as it got.
+    let partialText = '';
+    let bubbleId: string | null = null;
+    let paintHandle = 0;
+    const paintPartial = () => {
+      paintHandle = 0;
+      const id = bubbleId;
+      const text = partialText;
+      if (id) setMessages((prev) => prev.map((m) => (m.id === id ? { ...m, content: text } : m)));
+    };
+
     try {
-      let currentApiHistory = buildApiHistory(currentMessages, currentDigests);
-      let toolLoopTranscript: ConversationMessage[] = [];
-      let usedToolsInLoop = false;
+      currentDigests = await ensureContextWithinThreshold(currentHistory, currentDigests);
+      setContextDigests(currentDigests);
+      saveCurrentChat(activeChatId, currentMessages, currentHistory, currentDigests);
 
-      // Keep calling the API until there are no more tool calls
+      let courseOverview: string | null = null;
+      try {
+        courseOverview = await getGraphOverviewText();
+      } catch (e) {
+        console.warn('Course overview unavailable:', e);
+      }
+
+      let toolRounds = 0;
       while (true) {
-        const result = await callLLM(currentApiHistory, settings);
-
-        if (result.text) {
-          const assistantMessage: Message = {
-            id: (Date.now() + Math.random()).toString(),
-            role: 'assistant',
-            content: result.text,
-            timestamp: new Date(),
-          };
-
-          currentMessages = [...currentMessages, assistantMessage];
-          setMessages(currentMessages);
-
-          currentApiHistory = [...currentApiHistory, {
-            role: 'assistant',
-            content: result.text,
-          }];
-
-          if (usedToolsInLoop) {
-            toolLoopTranscript.push({
-              role: 'assistant',
-              content: result.text,
-            });
-          }
+        if (toolRounds >= MAX_TOOL_ROUNDS) {
+          throw new Error(`Stopped after ${MAX_TOOL_ROUNDS} rounds of tool calls without a final answer.`);
         }
 
-        // Parse function calls from response (Google AI specific)
+        // One bubble per model turn, created before the call so tokens have somewhere to land
+        bubbleId = (Date.now() + Math.random()).toString();
+        partialText = '';
+        currentMessages = [...currentMessages, { id: bubbleId, role: 'assistant', content: '', timestamp: new Date(), streaming: true }];
+        setMessages(currentMessages);
+
+        const result = await callLLM(buildApiHistory(currentHistory, currentDigests, systemPrompt, courseOverview), settings, {
+          signal,
+          onDelta: (text) => {
+            partialText += text;
+            if (!paintHandle) paintHandle = requestAnimationFrame(paintPartial); // one paint per frame
+          },
+        });
+        if (paintHandle) cancelAnimationFrame(paintHandle);
+        paintHandle = 0;
         const functionCalls = parseFunctionCalls(result.rawResponse);
 
-        if (functionCalls.length === 0) {
-          if (usedToolsInLoop && toolLoopTranscript.length > 0) {
-            const toolLoopDigest = await generateDigestText(toolLoopTranscript, settings, callLLM, 'tool_loop');
-            if (toolLoopDigest) {
-              currentDigests = [
-                ...currentDigests,
-                {
-                  id: `digest-${Date.now()}-${Math.random().toString(36).slice(2)}`,
-                  kind: 'tool_loop',
-                  content: toolLoopDigest,
-                  createdAt: new Date(),
-                },
-              ];
-            }
-          }
+        const bubble: Message = {
+          ...currentMessages[currentMessages.length - 1],
+          content: result.text,
+          streaming: false,
+          ...(functionCalls.length > 0 ? { activity: functionCalls.map((c) => describeToolCall(c.name, c.args)) } : {}),
+        };
+        // A turn with neither text nor tool calls has nothing to show
+        currentMessages = bubble.content || bubble.activity ? [...currentMessages.slice(0, -1), bubble] : currentMessages.slice(0, -1);
+        setMessages(currentMessages);
 
-          currentDigests = await ensureContextWithinThreshold(currentMessages, currentDigests);
-          setMessages(currentMessages);
-          setContextDigests(currentDigests);
-          saveCurrentChat(activeChatId, currentMessages, currentDigests);
-          break;
-        }
+        const textSignature = extractTextThoughtSignature(result.rawResponse);
+        currentHistory = [
+          ...currentHistory,
+          {
+            role: 'assistant',
+            content: result.text || '',
+            ...(functionCalls.length > 0 ? { toolCalls: functionCalls } : {}),
+            ...(textSignature ? { thoughtSignature: textSignature } : {}),
+          },
+        ];
+        partialText = '';
+        bubbleId = null;
 
-        usedToolsInLoop = true;
+        if (functionCalls.length === 0) break;
 
-        // Execute tools and keep results transient during the loop only.
-        const toolResultsParts = [];
-
+        toolRounds += 1;
+        const toolResults: ToolResult[] = [];
         for (const functionCall of functionCalls) {
+          if (signal.aborted) throw new DOMException('Stopped by the user', 'AbortError');
           const toolImpl = toolFunctions[functionCall.name];
-          let toolResult = JSON.stringify({ error: 'Tool not found' });
-
+          let toolResult = JSON.stringify({ error: `Tool not found: ${functionCall.name}` });
           if (toolImpl) {
             try {
-              const stringArgs = Object.entries(functionCall.args).reduce((acc, [key, value]) => {
-                acc[key] = String(value);
-                return acc;
-              }, {} as Record<string, string>);
-
-              toolResult = await toolImpl(stringArgs);
+              const stringArgs = Object.fromEntries(
+                Object.entries(functionCall.args).map(([key, value]) => [key, value == null ? '' : String(value)])
+              );
+              toolResult = await toolImpl(stringArgs, settings);
             } catch (error) {
-              toolResult = JSON.stringify({
-                error: error instanceof Error ? error.message : 'Unknown error',
-              });
+              toolResult = JSON.stringify({ error: error instanceof Error ? error.message : 'Unknown error' });
             }
           }
-
-          toolResultsParts.push({
-            functionResponse: {
-              name: functionCall.name,
-              response: {
-                result: toolResult,
-              },
-            },
-          });
-
-          toolLoopTranscript.push({
-            role: 'user',
-            content: JSON.stringify({
-              tool_name: functionCall.name,
-              tool_args: functionCall.args,
-              tool_result: toolResult,
-            }),
-          });
+          toolResults.push({ id: functionCall.id, name: functionCall.name, result: toolResult });
         }
-
-        currentApiHistory = [...currentApiHistory, {
-          role: 'user',
-          content: JSON.stringify({
-            tool_results: toolResultsParts.map((part) => part.functionResponse),
-          }),
-        }];
+        currentHistory = [...currentHistory, { role: 'user', content: '', toolResults }];
       }
+
+      // Persist real tool turns (results capped) so the next turn has them without a digest call
+      currentHistory = currentHistory.map(capToolResults);
+      currentDigests = await ensureContextWithinThreshold(currentHistory, currentDigests);
+      setApiHistory(currentHistory);
+      setContextDigests(currentDigests);
+      saveCurrentChat(activeChatId, currentMessages, currentHistory, currentDigests);
     } catch (error) {
-      console.error('Error calling API:', error);
+      if (paintHandle) cancelAnimationFrame(paintHandle);
+      const aborted = isAbortError(error);
+      if (!aborted) console.error('Error calling API:', error);
 
-      const errorMessage: Message = {
-        id: (Date.now() + 1).toString(),
-        role: 'assistant',
-        content: `Error: ${error instanceof Error ? error.message : 'Failed to get response from AI'}`,
-        timestamp: new Date(),
-      };
-
-      const errorMessages = [...currentMessages, errorMessage];
-      setMessages(errorMessages);
-      saveCurrentChat(activeChatId, errorMessages, currentDigests);
+      // The interrupted turn keeps whatever text arrived; an empty bubble is dropped
+      const interrupted = bubbleId ? currentMessages[currentMessages.length - 1] : null;
+      let finalMessages = interrupted
+        ? partialText
+          ? [...currentMessages.slice(0, -1), { ...interrupted, content: partialText, streaming: false }]
+          : currentMessages.slice(0, -1)
+        : currentMessages;
+      if (!aborted) {
+        finalMessages = [
+          ...finalMessages,
+          {
+            id: (Date.now() + 1).toString(),
+            role: 'assistant',
+            content: `Error: ${error instanceof Error ? error.message : 'Failed to get response from AI'}`,
+            timestamp: new Date(),
+          },
+        ];
+      }
+      // A tool-call turn without results would make the next request malformed: keep its text as
+      // a plain turn (what the user saw) and drop the calls. An interrupted turn keeps its text.
+      const capped = currentHistory.map(capToolResults);
+      const last = capped[capped.length - 1];
+      let safeHistory = last?.toolCalls?.length
+        ? [...capped.slice(0, -1), ...(last.content ? [{ role: 'assistant' as const, content: last.content }] : [])]
+        : capped;
+      if (partialText) safeHistory = [...safeHistory, { role: 'assistant', content: partialText }];
+      setMessages(finalMessages);
+      setApiHistory(safeHistory);
+      saveCurrentChat(activeChatId, finalMessages, safeHistory, currentDigests);
     } finally {
+      abortRef.current = null;
       setIsLoading(false);
+      memory.reload(); // the Memory sheet shows what this turn brought in
     }
   };
 
-  return (
-    <div className="flex h-full w-full bg-gray-900">
-      <Navigation
-        activeTab={activeTab}
-        onTabChange={setActiveTab}
-        chats={chats}
-        currentChatId={currentChatId}
-        onSelectChat={switchChat}
-        onNewChat={createNewChat}
-        onDeleteChat={deleteChat}
-      />
+  // Everything the UI sees; nothing under src/ui reaches past this object
+  const model: AppModel = {
+    chats: chats.map((c) => ({ id: c.id, title: c.title, updatedAt: c.updatedAt })),
+    currentChatId,
+    messages,
+    isLoading,
+    sendMessage: (content) => void handleSendMessage(content),
+    stop: handleStop,
+    newChat: () => void createNewChat(),
+    selectChat: switchChat,
+    deleteChat,
 
-      <main className="flex-1 flex flex-col overflow-hidden h-full">
-        {activeTab === 'chat' && (
-          <ChatUI
-            messages={messages}
-            onSendMessage={handleSendMessage}
-            isLoading={isLoading}
-          />
-        )}
-        {activeTab === 'settings' && (
-          <Settings
-            settings={settings}
-            onSettingsChange={handleSettingsChange}
-            currentContextTokens={currentContextTokens}
-          />
-        )}
-      </main>
-    </div>
-  );
+    settings,
+    updateSettings: handleSettingsChange,
+    currentContextTokens,
+
+    connection:
+      connection.status === 'connected'
+        ? { status: 'connected', host: connection.host, profileName: connection.profile.name, memoryName: connection.memory.name }
+        : connection,
+    notice,
+    reload: () => window.location.reload(),
+    connect,
+    disconnect: handleDisconnect,
+    deleteAccountData: () => void handleDeleteAccountData(),
+
+    memory,
+  };
+
+  return <Shell model={model} />;
 }
 
 export default App;

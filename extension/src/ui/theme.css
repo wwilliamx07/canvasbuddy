@@ -1,0 +1,102 @@
+/* The UI: white paper + black ink, one accent — the backpack blue from the logo (#004890).
+   Serif display type. Tokens scoped on the shell root. */
+
+.app {
+  --bg: #fbfbfc;
+  --bg-raised: #ffffff;
+  --bg-sunken: #f1f3f6;
+
+  --ink: #131518;
+  --ink-soft: #3d434b;
+  --ink-mute: #7a828d;
+
+  --line: #e3e6eb;
+  --line-strong: #c9cfd8;
+
+  --accent: #004890;
+  --accent-ink: #ffffff;
+  --accent-soft: rgba(0, 72, 144, 0.08);
+  --accent-soft-strong: rgba(0, 72, 144, 0.16);
+
+  --warn: #8a5a12;
+  --warn-soft: rgba(154, 107, 18, 0.12);
+
+  --error: #a33a3a;
+  --error-soft: rgba(163, 58, 58, 0.1);
+
+  --user-bubble: #e4ecf7;
+
+  --font-serif: 'Fraunces Variable', 'Iowan Old Style', serif;
+  --font-sans: 'Inter Variable', system-ui, sans-serif;
+
+  --radius: 10px;
+
+  font-family: var(--font-sans);
+  font-size: 13.5px;
+  line-height: 1.5;
+  color: var(--ink);
+  background: var(--bg);
+}
+
+.app .serif {
+  font-family: var(--font-serif);
+  font-optical-sizing: auto;
+}
+
+.app ::selection {
+  background: var(--accent-soft-strong);
+}
+
+.app * {
+  scrollbar-width: thin;
+  scrollbar-color: var(--line-strong) transparent;
+}
+
+.app .hairline {
+  border-color: var(--line);
+}
+
+/* prose overrides so the assistant's rendered markdown reads like the rest of the app */
+.app .prose {
+  color: var(--ink);
+  --tw-prose-body: var(--ink);
+  --tw-prose-headings: var(--ink);
+  --tw-prose-bold: var(--ink);
+  --tw-prose-links: var(--accent);
+  --tw-prose-code: var(--ink-soft);
+  --tw-prose-quotes: var(--ink-mute);
+  --tw-prose-quote-borders: var(--line-strong);
+  --tw-prose-th-borders: var(--line);
+  --tw-prose-td-borders: var(--line);
+}
+.app .prose :where(code):not(pre code) {
+  background: var(--bg-sunken);
+  border-radius: 4px;
+  padding: 0.1em 0.35em;
+  font-size: 0.9em;
+}
+.app .prose pre {
+  background: var(--bg-sunken);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+.app .prose table {
+  font-size: 0.92em;
+}
+.app .prose a {
+  text-decoration-color: var(--accent-soft-strong);
+}
+
+.app input[type='range'] {
+  accent-color: var(--accent);
+}
+
+.app textarea,
+.app input {
+  font-family: inherit;
+  color: var(--ink);
+}
+.app textarea::placeholder,
+.app input::placeholder {
+  color: var(--ink-mute);
+}
