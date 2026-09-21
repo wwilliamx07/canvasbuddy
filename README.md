@@ -1,44 +1,56 @@
 # CanvasBuddy
 
-CanvasBuddy is a personal AI agent for Canvas LMS — built on the University of Toronto's Quercus, and connectable to any Canvas site. It runs entirely in a browser side panel — no backend — and answers questions about your courses, deadlines, documents, announcements and inbox using your own LLM API key.
+## What it is
+
+CanvasBuddy is an AI agent for Canvas that lives in your browser's side panel.
+
+It works with any Canvas site. There is no server and no account to create. It uses the Canvas session you are already logged into, and you bring your own Gemini or OpenAI API key. Everything it learns stays in your browser.
 
 ## What it can do
 
-- Answer "what's due this week / what am I missing" from your planner across all courses
-- Find lectures, files and pages inside course modules — or on the course home page, where many courses keep them — and know what each course's nav bar offers (Piazza, lecture recordings…); list assignments with due dates, points and your submission status or grade
-- Search inside PDFs, slides, wiki pages, assignment descriptions, the syllabus, discussion threads and inbox threads (semantic + keyword), citing the page or slide
-- Read specific pages/slides of a document, or a whole message thread, verbatim
-- Show recent announcements, discussion topics (and read their replies), quiz rules (time limit, attempts, availability) and inbox conversations
-- Keep multiple chat threads locally
-- See what CanvasBuddy remembers in the **Memory** sheet: courses, modules, items, documents and when each collection was last checked. Memory fills as you chat and is kept current on its own; you can forget a collection, a document's text, or everything
+Ask it things like:
 
-## How it works
+- What do I have due this week? What am I missing?
+- Where are the lecture 5 slides for my stats course?
+- What did lecture 8 say about the central limit theorem?
+- Summarise the grading scheme in the syllabus.
+- Is the midterm open book? How long is the quiz and how many attempts do I get?
+- What was the last announcement in my algorithms course?
+- Did anyone on the forum ask about question 3 of the problem set?
+- What did my TA say in their last message?
+- Read me pages 4 to 6 of the week 2 notes.
 
-**One source of knowledge, kept current on demand.** All eight agent tools read a local copy of your Canvas data stored in PGlite (Postgres compiled to WASM, with pgvector, persisted in IndexedDB). Before a tool reads a collection, a freshness engine decides whether that collection is missing, stale, or unchanged:
+CanvasBuddy seamlessly navigates, learns, answers, remembers.
 
-- each collection has a max age (TTL) you can edit in **Settings → Freshness**;
-- within the TTL, collections that Canvas offers a cheap change check for (modules, announcements, inbox) are probed and updated only if something changed — e.g. only the modules whose item count moved are re-fetched, only inbox threads with a new message are re-read;
-- past the TTL a full sync runs, which also catches deletions;
-- collections a course hides from students (typically Files and Pages) are remembered as unavailable and not retried for a day.
+## Design philosophy
 
-The model never chooses between "live" and "cached" data and has no staleness rules; the only cache-related parameter is `refresh`, reserved for when you say something changed.
+A few ideas shape the design of CanvasBuddy.
 
-Canvas often hides a course's Files and Pages areas from students while everything stays reachable by direct link, so CanvasBuddy treats the course as a link graph: every page, description and announcement it reads has its links recorded, and the files and pages they point at become listable and indexable. Document text keeps those links as markers (`Syllabus [file 44541003]`) so the assistant can follow them.
+**Local first.** There is no backend. The database, file index and the agent loop all run in the extension itself. Canvas is reached with the cookies your browser already has, so no Canvas token is stored anywhere. You bring your own API key, and own your data.
 
-Documents are indexed just in time: the first question about a file downloads it, extracts text per page/slide (small slides are grouped so each chunk has enough context, and every chunk remembers the page range it covers), embeds it (768-d) and stores chunks with a full-text index and an HNSW vector index; later questions hit the local index. When a document changes upstream, only the pages whose text actually changed are re-embedded. Inbox threads are stored as text when the inbox syncs (keyword-searchable for free) and embedded only when a semantic search targets that thread.
+**Lazy by default.** Nothing is fetched or computed until something needs it. Courses are listed when you ask about them, a course's modules when it is explored, a document's text when it is first read or searched, an assignment's description on first access, a discussion's replies when a thread is opened. Embedding is the strictest case: no sync ever calls the embedding API, and a document is embedded only when a semantic search is about to look through it. This keeps first use fast and your API bill proportional to what you actually ask.
 
-**Architecture**
-- Manifest V3 extension for Chrome/Edge, opened as a side panel; Canvas is reached with your existing login session (no Canvas token) — the site's permission is requested when you connect, not at install
-- React 19 + TypeScript + Tailwind
-- Gemini or OpenAI (and OpenAI-compatible endpoints) for chat and embeddings, with real function-call turns on both; replies stream token by token, with a line per tool call the assistant made and a Stop button
-- Chats and settings in localStorage; graph and vectors in PGlite/IndexedDB — one memory (database + chats) per Canvas account, so two accounts in one browser profile never mix
-- Hybrid retrieval: pgvector cosine similarity (HNSW index) fused with Postgres full-text search (reciprocal rank fusion)
-- Assistant replies are rendered as sanitized Markdown (DOMPurify allowlist) with LaTeX via KaTeX, since their text derives from content other people author on Canvas
-- Context management: tool turns are persisted (capped) and older turns are summarized into digests when the configured token threshold is exceeded; the system prompt and tool schemas form a stable, cacheable prefix
+**Maximal caching, engine owned.** Everything the assistant reads comes from a local copy of your Canvas. The Canvas API is only hit when a freshness engine determines required information is missing or outdated. The model never works with the Canvas API directly.
 
-For the full architecture reference see [`reference/`](reference/README.md). Agents and developers should read it before changing code (see `CLAUDE.md`).
+**A minimal toolset.** Eight tools, each a thin read over the local graph, rather than one tool per Canvas endpoint. Less tools and ambiguity reduces hallucinations while maintaining functionality.
 
-## Build
+## Technical overview
+
+**Persistent memory.** A Postgres database compiled to WebAssembly (PGlite, with pgvector) persisted in IndexedDB. It holds thin mirrors of Canvas listings (courses, modules and items, assignments and your submissions, pages, files, announcements, discussions, quizzes, planner, inbox), a link graph between them, document text and vectors, and a sync stamp per collection. Chats and settings live in localStorage.
+
+**Freshness engine.** Before a tool reads a collection, the engine checks its stamp. Each collection has a maximum age you can edit in Settings. Within that age, collections Canvas offers a cheap change check for (modules, announcements, discussions, inbox, home page, syllabus) are probed and refetched only if something moved, and only the parts that moved. Past it, a full sync runs, which is also what catches deletions. Collections a course hides from students are remembered as unavailable and not retried for a day. Concurrent requests for the same collection share one fetch.
+
+**Just in time indexing and hybrid search.** The first question about a document downloads it, extracts text per page or slide, groups small slides so every chunk has enough context, embeds the chunks (768 dimensions) and stores them with a full text index and an HNSW vector index. Search fuses vector similarity with Postgres full text ranking, because course material is full of exact tokens like "Theorem 3.2" where keywords win and paraphrased questions where embeddings win. Every chunk remembers the page range it covers, which the model cites instead of guessing. When a document changes upstream, only chunks whose text changed are re-embedded. Inbox and discussion threads are stored as text when they sync and embedded only when a semantic search targets them.
+
+**Link markers.** Document text keeps its links as short markers, like `[file 44541003]` or `[page week-1]`, so the assistant can follow a link from the syllabus to the file it names, or give you the URL.
+
+**Agent loop.** Supports Gemini and OpenAI models, and OpenAI compatible endpoints. Tool turns are persisted, capped, and summarised into digests when the conversation grows past your threshold.
+
+**Rendering.** Replies are Markdown with LaTeX. Because their text derives from content other people wrote on Canvas, they are sanitised through an allowlist before they reach the page, and math is rendered by KaTeX after sanitising.
+
+The full architecture reference is in [`reference/`](reference/README.md).
+
+## Build and install
 
 ```bash
 cd extension
@@ -46,6 +58,7 @@ npm install
 npm run build
 ```
 
-Then load `extension/dist` as an unpacked extension (chrome://extensions → Developer mode → Load unpacked), open your Canvas site in a tab and sign in, and click the toolbar icon to open the side panel. Quercus connects automatically; another Canvas shows a **Grant access to <your site>** button once (CanvasBuddy checks the tab is a Canvas page, then Chrome asks for permission to that site). Enter your Gemini or OpenAI key in **Settings**.
-
-Type-check with `npx tsc -p tsconfig.app.json --noEmit` from `extension/`.
+1. Open `chrome://extensions`, turn on Developer mode, choose **Load unpacked**, and pick `extension/dist`.
+2. Open your Canvas site in a tab and sign in.
+3. Click the CanvasBuddy icon in the toolbar. The side panel opens. A known Canvas connects on its own; any other site shows a **Grant access** button once.
+4. Open Settings in the panel and paste your Gemini or OpenAI API key.
