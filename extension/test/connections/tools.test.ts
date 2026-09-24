@@ -126,14 +126,10 @@ describe('runConnectionTool', () => {
 });
 
 describe('managing connections', () => {
-  it('parseServerUrl accepts https only, refuses the Canvas host, drops the fragment', () => {
+  it('parseServerUrl accepts https only and drops the fragment', () => {
     expect(parseServerUrl(' https://mcp.notion.com/mcp#x ')).toBe('https://mcp.notion.com/mcp');
     expect(() => parseServerUrl('http://mcp.test/mcp')).toThrow(/Only https/);
     expect(() => parseServerUrl('not a url')).toThrow(/full URL/);
-    expect(() => parseServerUrl('https://canvas.test/mcp', 'canvas.test')).toThrow(/Canvas site cannot be added/);
-    // …nor any host the deployment counts as its own (Instructure-hosted, or another Quercus host)
-    expect(() => parseServerUrl('https://school.instructure.com/mcp', 'canvas.test')).toThrow(/Canvas site cannot be added/);
-    expect(() => parseServerUrl('https://mcp.utoronto.ca/mcp', 'q.utoronto.ca')).toThrow(/Canvas site cannot be added/);
   });
 
   it('adding lists the tools and covers the host with the Origin rule', async () => {

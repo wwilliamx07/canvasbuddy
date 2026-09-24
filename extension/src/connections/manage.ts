@@ -1,4 +1,3 @@
-import { profileFor } from '../canvas/profiles';
 import { dropSession, listTools, McpAuthError } from './mcp';
 import { authEndpoints, discoverIssuer, signIn } from './oauth';
 import {
@@ -18,7 +17,7 @@ import {
  */
 
 /** A valid remote server URL, or an error the user can act on. */
-export function parseServerUrl(input: string, canvasHost?: string): string {
+export function parseServerUrl(input: string): string {
   let url: URL;
   try {
     url = new URL(input.trim());
@@ -26,10 +25,6 @@ export function parseServerUrl(input: string, canvasHost?: string): string {
     throw new Error('Enter the server\'s full URL, e.g. https://mcp.example.com/mcp');
   }
   if (url.protocol !== 'https:') throw new Error('Only https servers can be connected.');
-  // Connection tools must never be a way to act on Canvas: no host the deployment counts as its own
-  if (canvasHost && profileFor(canvasHost).isInternalHost(url.hostname, canvasHost)) {
-    throw new Error('Your Canvas site cannot be added as a connection.');
-  }
   url.hash = '';
   return url.toString();
 }

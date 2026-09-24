@@ -47,7 +47,7 @@ function toView(c: ConnectionRecord): ConnectionView {
  * when a tool call refreshes a token or finds that a server wants a new sign-in. Each action that
  * reaches a new origin asks Chrome for it first, while the click's gesture is still fresh.
  */
-export function useConnections(canvasHost: string | undefined): { model: ConnectionsModel; records: ConnectionRecord[] } {
+export function useConnections(): { model: ConnectionsModel; records: ConnectionRecord[] } {
   const [records, setRecords] = useState<ConnectionRecord[]>([]);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -107,7 +107,7 @@ export function useConnections(canvasHost: string | undefined): { model: Connect
     error,
     add: (input, name) =>
       void run('new', async () => {
-        const url = parseServerUrl(input, canvasHost);
+        const url = parseServerUrl(input);
         await requestOrigins([url]);
         const added = await addConnection(url, name);
         if (added.status === 'error') setError(added.error || 'The server could not be reached.');

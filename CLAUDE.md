@@ -41,7 +41,7 @@ If a change alters something the reference describes — a tool added/removed/ch
 - The UI is written against `AppModel` (`src/ui/model.ts`); components take the model, never data-layer imports. Extend the model (and the hook that fills it) before a component.
 - Tool implementations return JSON strings and never throw. Built-in tool args arrive as strings; connection (MCP) tools get the model's arguments with their JSON types, because the server validates them against its own schema.
 - Connection tools past `EAGER_CONNECTION_TOKENS` load on demand through `find_connection_tools`; don't declare large connection schemas on every call.
-- Connection tools never act on Canvas, and any connection tool the server does not mark read-only waits for the student's approval unless they chose "Always allow". Connections are remote MCP servers only — no code is downloaded or run, and no per-service integrations.
+- Any connection tool the server does not mark read-only waits for the student's approval unless they chose "Always allow". Connections are remote MCP servers only — no code is downloaded or run, and no per-service integrations.
 - SQL lives in `src/db/*` (plus the `sync_state` bookkeeping in `canvas/freshness.ts`); components, tools and `canvas/*` call functions.
 
 ## Build / check

@@ -201,7 +201,7 @@ function App() {
     initialError: connection.status === 'disconnected' ? connection.reason : undefined,
   });
   const memory = useMemoryExplorer(connection.status === 'connected');
-  const connections = useConnections(settings.canvasHost);
+  const connections = useConnections();
   const providerAccess = useProviderAccess(settings);
 
   // Tools of the enabled, working connections. Small setups declare them all on every call; past

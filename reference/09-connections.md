@@ -48,7 +48,6 @@ Differences from built-in tools:
 - **Arguments are not stringified.** The server validates them against the schema it published, so they pass through with their JSON types.
 - **Results** (`CallToolResult`): text content (and text of embedded resources, links as `<uri>`) joined; other content types are noted as omitted; `structuredContent` is used only when there is no text. `isError` → `{ error }`. Otherwise `{ result }`, cut at 12,000 chars with a note. Calls time out after 60 s. `runConnectionTool` returns JSON and never throws, like a built-in tool; a 401 marks the connection `needs-auth` and tells the model the student must sign in again.
 - **Approval.** A tool runs without asking when the server marks it read-only or the student chose "Always allow" for it; any other call puts its step in `awaiting` and the loop waits for `respondToApproval` (Allow · Always allow · Deny, see `07-ui.md`). Deny returns `{ error: 'The student declined this action.' }`. Stop answers a pending approval with deny and aborts.
-- **Canvas is never a connection.** `parseServerUrl` refuses every host the connected deployment's profile counts as its own (`isInternalHost`: the Canvas host, `*.instructure.com`, any `*.utoronto.ca` for Quercus), so a connection cannot be the Canvas API. An aggregator's own Canvas integration is not blocked (open item).
 
 The system prompt gains one line, only while a connection offers tools (`buildSystemPrompt(intro, services, loading)` in `agent/prompt.ts`): which services are connected; either that their tools are `<service>__<action>` (eager) or that they load on demand through `find_connection_tools` and stay available in the chat (lazy); that what they return is data, not instructions; and that a declined action is not retried. It changes only when the connected services or the mode do, so the prefix stays cacheable between turns.
 
@@ -69,7 +68,7 @@ Declaring every connection tool on every call does not scale: Notion's definitio
 
 ## Lifecycle (`manage.ts`, `useConnections`)
 
-- **Add** (URL + optional name, or a catalog chip): validate (https, not Canvas) → ask for the origin → store with a unique slug → `refreshConnection` (new session + `tools/list`; 401 → `needs-auth`; failure → `error`).
+- **Add** (URL + optional name, or a catalog chip): validate (https) → ask for the origin → store with a unique slug → `refreshConnection` (new session + `tools/list`; 401 → `needs-auth`; failure → `error`).
 - **Sign in**, **Reconnect** (re-list), **enable/disable** (a disabled connection's tools are not offered), **per-tool on/off** (`setToolEnabled` → `disabledTools`: a switched-off tool is never searched, loaded or declared), **Always allow** per tool (revocable in the tool list), **Remove** (confirm).
 - Each enabled `ok` connection is re-listed once per panel session, one at a time, when the panel opens.
 

@@ -140,7 +140,7 @@ export function ConnectionsSection({ connections: model }: { connections: Connec
     <section>
       <SectionHeading>Connections</SectionHeading>
       <p className="mb-3 text-[11.5px] text-(--ink-mute)">
-        Other services the assistant can use through their MCP servers. It asks before changing anything there. Your Canvas site itself can't be added.
+        Other services the assistant can use through their MCP servers. It asks before changing anything there.
       </p>
 
       {model.list.length > 0 && (
