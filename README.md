@@ -1,4 +1,5 @@
 # CanvasBuddy
+<img src="extension/public/logo128.png">
 
 ## What it is
 
