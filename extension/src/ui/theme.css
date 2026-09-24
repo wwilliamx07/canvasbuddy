@@ -87,6 +87,26 @@
   text-decoration-color: var(--accent-soft-strong);
 }
 
+/* a model thought in the run's steps: quieter than the answer */
+.app .prose.thought {
+  font-size: 12px;
+  line-height: 1.5;
+  font-style: italic;
+  --tw-prose-body: var(--ink-mute);
+  --tw-prose-bold: var(--ink-soft);
+  color: var(--ink-mute);
+}
+.app .prose.thought > :first-child {
+  margin-top: 0;
+}
+.app .prose.thought > :last-child {
+  margin-bottom: 0;
+}
+.app .prose.thought :where(p, ul, ol) {
+  margin-top: 0.4em;
+  margin-bottom: 0.4em;
+}
+
 .app input[type='range'] {
   accent-color: var(--accent);
 }

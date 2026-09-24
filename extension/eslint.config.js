@@ -19,5 +19,21 @@ export default defineConfig([
       ecmaVersion: 2020,
       globals: globals.browser,
     },
+    rules: {
+      // `_name` marks a binding that is there on purpose: a rest-destructure that drops a field, a
+      // parameter a signature requires
+      '@typescript-eslint/no-unused-vars': [
+        'error',
+        { argsIgnorePattern: '^_', varsIgnorePattern: '^_', caughtErrorsIgnorePattern: '^_', destructuredArrayIgnorePattern: '^_', ignoreRestSiblings: true },
+      ],
+    },
+  },
+  {
+    // Wire formats of external APIs (model providers, MCP / OAuth servers, SSE payloads) are read
+    // loosely on purpose, and tests inspect raw rows and requests; everything else is typed.
+    files: ['src/providers/**', 'src/connections/mcp.ts', 'src/connections/oauth.ts', 'src/utils/sse.ts', 'test/**'],
+    rules: {
+      '@typescript-eslint/no-explicit-any': 'off',
+    },
   },
 ])

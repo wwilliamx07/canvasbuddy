@@ -1,5 +1,7 @@
 import type { CollectionStatus } from './model';
 
+export { compactNumber, formatUsage } from '../utils/tokens';
+
 /** "just now", "3 min ago", "2 h ago", "yesterday", "Sep 12" */
 export function timeAgo(date: Date | string | null | undefined, now: Date = new Date()): string {
   if (!date) return '';
@@ -63,9 +65,15 @@ export function syncPill(c: CollectionStatus, now: Date = new Date()): { label: 
   }
 }
 
+/** "≈9k tokens", "≈450 tokens". */
+export function formatTokens(tokens: number): string {
+  return tokens >= 1000 ? `≈${(tokens / 1000).toFixed(tokens >= 10000 ? 0 : 1)}k tokens` : `≈${tokens} tokens`;
+}
+
 export function formatBytes(n: number | null): string {
   if (n == null) return '';
   if (n < 1024) return `${n} B`;
   if (n < 1024 * 1024) return `${Math.round(n / 1024)} KB`;
   return `${(n / (1024 * 1024)).toFixed(1)} MB`;
 }
+

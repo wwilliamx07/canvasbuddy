@@ -1,27 +1,28 @@
 /**
  * Database schema for PGlite. Runs on every start; every statement is idempotent (IF NOT EXISTS),
  * so a database is created complete on first use and left alone afterwards. There are no
- * migrations yet — nobody has a database worth carrying forward — so a schema change is made in
- * the CREATE TABLE and an existing database is reset ("Forget everything" in the Memory sheet).
+ * migrations yet, so a schema change is made in the CREATE TABLE and an existing database only
+ * gets it when it is recreated ("Delete this account's data" in Settings). "Forget everything"
+ * empties the tables but keeps their definitions, so it does not apply a schema change.
  */
 
 export const SCHEMA_SQL = `
--- 1. Vector extension
+-- Vector extension
 CREATE EXTENSION IF NOT EXISTS vector;
 
--- 2. Courses Table
+-- Courses Table
 CREATE TABLE IF NOT EXISTS courses (
   course_id     TEXT PRIMARY KEY,
   name          TEXT NOT NULL,
   course_code   TEXT,
   term          TEXT,
   default_view  TEXT,        -- what "Home" shows: wiki | modules | syllabus | assignments | feed
-  syllabus_body    TEXT,     -- the Syllabus tab body (raw HTML); the syllabus:<course> document is indexed from it
-  syllabus_version TEXT,     -- fingerprint of syllabus_body (Canvas gives it no timestamp)
+  syllabus_body    TEXT,     -- the Syllabus tab body as text with link markers (ingestHtml); the syllabus:<course> document is indexed from it
+  syllabus_version TEXT,     -- fingerprint of the HTML Canvas returned (it has no timestamp)
   synced_at     TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );
 
--- 3. Modules Table
+-- Modules Table
 CREATE TABLE IF NOT EXISTS modules (
   module_id     TEXT PRIMARY KEY,
   course_id     TEXT REFERENCES courses(course_id) ON DELETE CASCADE,
@@ -30,7 +31,7 @@ CREATE TABLE IF NOT EXISTS modules (
   synced_at     TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );
 
--- 4. Module Items Table
+-- Module Items Table
 CREATE TABLE IF NOT EXISTS module_items (
   item_id       TEXT PRIMARY KEY,
   module_id     TEXT REFERENCES modules(module_id) ON DELETE CASCADE,
@@ -42,17 +43,18 @@ CREATE TABLE IF NOT EXISTS module_items (
   synced_at     TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );
 
--- 5. Assignments Table
---    Synced from the compact assignment_groups listing (no description). The description is
---    fetched lazily by get_assignment / indexing and cached while description_version = updated_at.
+-- Assignments Table
+--   Synced from the compact assignment_groups listing (no description). The description is
+--   fetched lazily by get_assignment / indexing, stored as text with link markers (ingestHtml)
+--   and kept while description_version = updated_at.
 CREATE TABLE IF NOT EXISTS assignments (
   assignment_id   TEXT PRIMARY KEY,
   course_id       TEXT REFERENCES courses(course_id) ON DELETE CASCADE,
   name            TEXT NOT NULL,
   due_at          TIMESTAMPTZ,
-  points_possible NUMERIC,
+  points_possible DOUBLE PRECISION,
   html_url        TEXT,
-  description     TEXT,          -- raw HTML from Canvas; indexed on demand
+  description     TEXT,          -- text with link markers; indexed on demand
   updated_at      TEXT,
   synced_at       TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
   submission_types TEXT,         -- comma-joined
@@ -60,14 +62,14 @@ CREATE TABLE IF NOT EXISTS assignments (
   description_version TEXT       -- updated_at at the time description was fetched
 );
 
--- 5a. The student's own submission state per assignment (shaped at store time)
+-- The student's own submission state per assignment (shaped at store time)
 CREATE TABLE IF NOT EXISTS submissions (
   assignment_id  TEXT PRIMARY KEY,
   course_id      TEXT REFERENCES courses(course_id) ON DELETE CASCADE,
   workflow_state TEXT,           -- unsubmitted | submitted | graded | pending_review
   submitted_at   TIMESTAMPTZ,
   graded_at      TIMESTAMPTZ,
-  score          NUMERIC,
+  score          DOUBLE PRECISION,
   grade          TEXT,
   late           BOOLEAN,
   missing        BOOLEAN,
@@ -75,7 +77,7 @@ CREATE TABLE IF NOT EXISTS submissions (
   synced_at      TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );
 
--- 5c. Announcements (HTML already converted to text)
+-- Announcements (HTML already converted to text)
 CREATE TABLE IF NOT EXISTS announcements (
   announcement_id TEXT PRIMARY KEY,
   course_id       TEXT REFERENCES courses(course_id) ON DELETE CASCADE,
@@ -87,9 +89,9 @@ CREATE TABLE IF NOT EXISTS announcements (
   synced_at       TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );
 
--- 5f. Discussion topics (the course forum). The topic message is stored as text; the reply
---     tree is fetched on demand into the 'discussion:<id>' document (one chunk per entry) and
---     replies_synced_for records the last_reply_at those entries correspond to.
+-- Discussion topics (the course forum). The topic message is stored as text; the reply
+--   tree is fetched on demand into the 'discussion:<id>' document (one chunk per entry) and
+--   replies_synced_for records the last_reply_at those entries correspond to.
 CREATE TABLE IF NOT EXISTS discussions (
   discussion_id   TEXT PRIMARY KEY,
   course_id       TEXT REFERENCES courses(course_id) ON DELETE CASCADE,
@@ -107,8 +109,8 @@ CREATE TABLE IF NOT EXISTS discussions (
   synced_at       TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );
 
--- 5g. Quizzes (the Quizzes tab): the fields the assignments listing lacks — time limit,
---     attempts, availability window, question count. assignment_id joins the student's submission.
+-- Quizzes (the Quizzes tab): the fields the assignments listing lacks — time limit,
+--   attempts, availability window, question count. assignment_id joins the student's submission.
 CREATE TABLE IF NOT EXISTS quizzes (
   quiz_id          TEXT PRIMARY KEY,
   course_id        TEXT REFERENCES courses(course_id) ON DELETE CASCADE,
@@ -117,7 +119,7 @@ CREATE TABLE IF NOT EXISTS quizzes (
   time_limit       INT,              -- minutes; NULL = none
   allowed_attempts INT,              -- -1 = unlimited
   question_count   INT,
-  points_possible  NUMERIC,
+  points_possible  DOUBLE PRECISION,
   due_at           TIMESTAMPTZ,
   unlock_at        TIMESTAMPTZ,
   lock_at          TIMESTAMPTZ,
@@ -129,8 +131,8 @@ CREATE TABLE IF NOT EXISTS quizzes (
   synced_at        TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );
 
--- 5d. Planner window (cross-course to-do list; course_id has no FK because the planner may
---     reference courses that are not in the graph)
+-- Planner window (cross-course to-do list; course_id has no FK because the planner may
+--   reference courses that are not in the graph)
 CREATE TABLE IF NOT EXISTS planner_items (
   item_key       TEXT PRIMARY KEY,   -- '<plannable_type>:<plannable_id>'
   plannable_type TEXT NOT NULL,
@@ -139,7 +141,7 @@ CREATE TABLE IF NOT EXISTS planner_items (
   context_name   TEXT,
   title          TEXT NOT NULL,
   date           TIMESTAMPTZ,
-  points         NUMERIC,
+  points         DOUBLE PRECISION,
   submitted      BOOLEAN,
   late           BOOLEAN,
   missing        BOOLEAN,
@@ -149,7 +151,7 @@ CREATE TABLE IF NOT EXISTS planner_items (
   synced_at      TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );
 
--- 5e. Inbox: conversation list + messages of threads that have been fetched
+-- Inbox: conversation list + messages of threads that have been fetched
 CREATE TABLE IF NOT EXISTS conversations (
   conversation_id TEXT PRIMARY KEY,
   subject         TEXT,
@@ -175,7 +177,7 @@ CREATE TABLE IF NOT EXISTS messages (
   body_tsv        TSVECTOR
 );
 
--- 5b. Wiki Pages
+-- Wiki Pages
 CREATE TABLE IF NOT EXISTS pages (
   page_url      TEXT NOT NULL,
   course_id     TEXT REFERENCES courses(course_id) ON DELETE CASCADE,
@@ -187,7 +189,7 @@ CREATE TABLE IF NOT EXISTS pages (
   PRIMARY KEY (course_id, page_url)
 );
 
--- 6. Graph Edges Table (Prerequisites, References)
+-- Graph Edges Table (Prerequisites, References)
 CREATE TABLE IF NOT EXISTS graph_edges (
   edge_id   BIGSERIAL PRIMARY KEY,
   from_type TEXT NOT NULL,
@@ -198,10 +200,10 @@ CREATE TABLE IF NOT EXISTS graph_edges (
   UNIQUE (from_type, from_id, to_type, to_id, relation)
 );
 
--- 7. Indexable documents: Canvas files, plus wiki pages, assignment descriptions, inbox threads,
---    discussion threads and course syllabi. A row with total_chunks = 0 is "known but not indexed".
---    file_id is the Canvas file id for files, 'page:<course>:<url>' for pages,
---    'assignment:<id>', 'conversation:<id>', 'discussion:<id>', 'syllabus:<course>'.
+-- Indexable documents: Canvas files, plus wiki pages, assignment descriptions, inbox threads,
+--   discussion threads and course syllabi. A row with total_chunks = 0 is "known but not indexed".
+--   file_id is the Canvas file id for files, 'page:<course>:<url>' for pages,
+--   'assignment:<id>', 'conversation:<id>', 'discussion:<id>', 'syllabus:<course>'.
 CREATE TABLE IF NOT EXISTS files (
   file_id         TEXT PRIMARY KEY,
   course_id       TEXT REFERENCES courses(course_id) ON DELETE SET NULL,
@@ -211,13 +213,14 @@ CREATE TABLE IF NOT EXISTS files (
   extracted_at    TIMESTAMPTZ,
   total_chunks    INT DEFAULT 0,
   source_type     TEXT DEFAULT 'file',   -- 'file' | 'page' | 'assignment' | 'conversation' | 'discussion' | 'syllabus'
+  page_kind       TEXT,                  -- what page_number counts: 'page' | 'slide' | 'section' (NULL for threads)
   embedding_model TEXT,                  -- provider/model the stored vectors came from
   html_url        TEXT,
   content_type    TEXT,
   size            BIGINT
 );
 
--- 8. Document Chunks & Vector Embeddings
+-- Document Chunks & Vector Embeddings
 CREATE TABLE IF NOT EXISTS file_chunks (
   chunk_id      TEXT PRIMARY KEY,
   file_id       TEXT REFERENCES files(file_id) ON DELETE CASCADE,
@@ -231,8 +234,8 @@ CREATE TABLE IF NOT EXISTS file_chunks (
   content_tsv   TSVECTOR       -- full-text index for hybrid (keyword + vector) search
 );
 
--- 9. Freshness state per scope ('courses', 'planner', 'inbox', 'course:<id>:<collection>').
---    Owned by canvas/freshness.ts. status = 'ok' | 'unavailable' (course hides the collection).
+-- Freshness state per scope ('courses', 'planner', 'inbox', 'course:<id>:<collection>').
+--   Owned by canvas/freshness.ts. status = 'ok' | 'unavailable' (course hides the collection).
 CREATE TABLE IF NOT EXISTS sync_state (
   scope       TEXT PRIMARY KEY,
   synced_at   TIMESTAMPTZ,
@@ -242,7 +245,7 @@ CREATE TABLE IF NOT EXISTS sync_state (
   error       TEXT
 );
 
--- 10. Course navigation (Tabs API): what the course's nav bar offers, incl. external tools.
+-- Course navigation (Tabs API): what the course's nav bar offers, incl. external tools.
 CREATE TABLE IF NOT EXISTS course_tabs (
   course_id TEXT REFERENCES courses(course_id) ON DELETE CASCADE,
   tab_id    TEXT NOT NULL,
@@ -253,14 +256,14 @@ CREATE TABLE IF NOT EXISTS course_tabs (
   PRIMARY KEY (course_id, tab_id)
 );
 
--- 11. Hyperlinks found in HTML bodies (front page, wiki pages, assignment descriptions,
---     announcements, discussion topics, quiz descriptions, the syllabus). This is how content the
---     instructor organised as "a page with links" becomes discoverable when the Files/Pages areas
---     are hidden from students.
+-- Hyperlinks found in HTML bodies (front page, wiki pages, assignment descriptions,
+--   announcements, discussion topics, quiz descriptions, the syllabus). This is how content the
+--   instructor organised as "a page with links" becomes discoverable when the Files/Pages areas
+--   are hidden from students.
 CREATE TABLE IF NOT EXISTS content_links (
   course_id TEXT REFERENCES courses(course_id) ON DELETE CASCADE,
-  from_type TEXT NOT NULL,    -- 'page' | 'assignment' | 'announcement' | 'discussion' | 'quiz' | 'syllabus'
-  from_id   TEXT NOT NULL,    -- page slug / assignment id / announcement id / discussion id / quiz id / course id
+  from_type TEXT NOT NULL,    -- 'page' | 'assignment' | 'announcement' | 'discussion' | 'discussion_replies' | 'quiz' | 'syllabus'
+  from_id   TEXT NOT NULL,    -- page slug / assignment id / announcement id / discussion id (both discussion kinds) / quiz id / course id
   to_type   TEXT NOT NULL,    -- 'file' | 'page' | 'assignment' | 'quiz' | 'discussion' | 'module' | 'external'
   to_ref    TEXT NOT NULL,    -- file id / page slug / assignment id / … / URL
   label     TEXT,

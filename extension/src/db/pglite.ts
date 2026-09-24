@@ -45,8 +45,12 @@ export async function closeDB(): Promise<void> {
  * side panel per window. Hold a Web Lock for the lifetime of this page; a second page gets a
  * clear error instead of silently corrupting the database.
  */
+let heldLock: string | null = null;
+
 async function acquireExclusiveLock(name: string): Promise<void> {
   if (typeof navigator === 'undefined' || !navigator.locks) return;
+  // Held until the page unloads: a retry after a failed init, or a reopen after closeDB, already has it
+  if (heldLock === name) return;
 
   const acquired = await new Promise<boolean>((resolve) => {
     navigator.locks
@@ -67,6 +71,7 @@ async function acquireExclusiveLock(name: string): Promise<void> {
       'CanvasBuddy is already open in another browser window. Close it there to use it here.'
     );
   }
+  heldLock = name;
 }
 
 /**
