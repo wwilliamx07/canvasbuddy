@@ -1,10 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
-import { ArrowUp, Dot, Plus, Square, Trash2 } from 'lucide-react';
-import type { AppModel, ChatSummary, Message } from './model';
-import { timeAgo } from './format';
+import { ArrowUp, ChevronRight, CircleAlert, Clock, Plus, Square, Trash2 } from 'lucide-react';
+import type { AppModel, ApprovalDecision, ChatSummary, CommandInfo, Message, Step } from './model';
+import { formatUsage, timeAgo } from './format';
 import { renderMarkdown } from '../utils/markdown';
-import { Logo } from './primitives';
+import { Logo, Spinner } from './primitives';
 
 const MAX_TEXTAREA_LINES = 4;
 
@@ -23,16 +23,134 @@ function TypingDots() {
   );
 }
 
-function ActivityList({ lines }: { lines: string[] }) {
+function NoticeStep({ step }: { step: Step }) {
   return (
-    <ul className="space-y-1">
-      {lines.map((line, i) => (
-        <li key={i} className="flex items-start gap-1 text-[11.5px] tracking-wide text-(--ink-mute) uppercase">
-          <Dot size={14} className="mt-[-1px] shrink-0 text-(--accent)" />
-          <span className="truncate normal-case">{line}</span>
-        </li>
-      ))}
-    </ul>
+    <li className="flex items-center gap-1 text-[11.5px] text-(--ink-mute)">
+      <Clock size={11} className="shrink-0" />
+      <span className="min-w-0 flex-1 truncate">{step.label}</span>
+      {step.status === 'running' && <Spinner size={10} />}
+    </li>
+  );
+}
+
+function ThoughtStep({ step }: { step: Step }) {
+  return (
+    <li
+      className="prose prose-sm thought max-w-none break-words"
+      dangerouslySetInnerHTML={{ __html: renderMarkdown(step.label) }}
+    />
+  );
+}
+
+function ToolStep({ step, onApprove }: { step: Step; onApprove: (decision: ApprovalDecision) => void }) {
+  const [expanded, setOpen] = useState(false);
+  const awaiting = step.status === 'awaiting';
+  const open = expanded || awaiting; // the student sees what they are approving
+  const expandable = Boolean(step.detail || step.result) && !awaiting;
+  return (
+    <li>
+      <button
+        type="button"
+        disabled={!expandable}
+        onClick={() => setOpen((v) => !v)}
+        className="flex w-full items-center gap-1 text-left text-[12px] text-(--ink-soft) enabled:hover:text-(--ink)"
+      >
+        <ChevronRight size={12} className={`shrink-0 text-(--ink-mute) transition-transform ${open ? 'rotate-90' : ''} ${expandable ? '' : 'opacity-0'}`} />
+        <span className="min-w-0 flex-1 truncate">{step.label}</span>
+        {step.status === 'running' && <span className="shrink-0 text-(--ink-mute)"><Spinner size={11} /></span>}
+        {step.status === 'error' && <CircleAlert size={12} className="shrink-0 text-(--error)" />}
+      </button>
+      {open && (
+        <div className="mt-1 ml-4 space-y-1 rounded-md bg-(--bg-sunken) px-2 py-1.5 font-mono text-[10.5px] leading-snug break-all whitespace-pre-wrap text-(--ink-mute)">
+          {step.detail && <div>{step.detail}</div>}
+          {step.result && <div className={step.status === 'error' ? 'text-(--error)' : 'text-(--ink-soft)'}>{step.result}</div>}
+        </div>
+      )}
+      {awaiting && (
+        <div className="mt-1.5 ml-4">
+          <p className="mb-1.5 text-[11.5px] text-(--ink-soft)">This changes something in a connected service. Allow it?</p>
+          <div className="flex flex-wrap gap-1.5">
+            <button
+              type="button"
+              onClick={() => onApprove('allow')}
+              className="rounded-full bg-(--accent) px-3 py-1 text-[12px] text-(--accent-ink) hover:opacity-90"
+            >
+              Allow
+            </button>
+            <button
+              type="button"
+              onClick={() => onApprove('always')}
+              className="rounded-full border border-(--line) px-3 py-1 text-[12px] text-(--ink-soft) hover:bg-(--bg-sunken)"
+            >
+              Always allow
+            </button>
+            <button
+              type="button"
+              onClick={() => onApprove('deny')}
+              className="rounded-full border border-(--line) px-3 py-1 text-[12px] text-(--error) hover:bg-(--error-soft)"
+            >
+              Deny
+            </button>
+          </div>
+        </div>
+      )}
+    </li>
+  );
+}
+
+/**
+ * The run's thoughts and tool calls above the answer. Open while the assistant works and nothing
+ * is written yet, closed once text arrives; a click overrides either.
+ */
+function StepsBlock({
+  steps,
+  working,
+  hasContent,
+  onApprove,
+}: {
+  steps: Step[];
+  working: boolean;
+  hasContent: boolean;
+  onApprove: (decision: ApprovalDecision) => void;
+}) {
+  const [manual, setManual] = useState<boolean | null>(null);
+  const awaiting = steps.some((s) => s.status === 'awaiting');
+  const open = awaiting || (manual ?? (working && !hasContent));
+  const n = steps.length;
+  const title = `${working ? 'Working through' : 'Worked through'} ${n} step${n === 1 ? '' : 's'}`;
+  return (
+    <div className="mb-1.5">
+      <button
+        type="button"
+        onClick={() => setManual(!open)}
+        className="flex items-center gap-1 text-[11.5px] tracking-wide text-(--ink-mute) hover:text-(--ink-soft)"
+      >
+        <ChevronRight size={13} className={`transition-transform ${open ? 'rotate-90' : ''}`} />
+        {title}
+        {working && !open && <span className="ml-0.5"><Spinner size={10} /></span>}
+      </button>
+      <AnimatePresence initial={false}>
+        {open && (
+          <motion.ul
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: 'auto', opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            transition={{ duration: 0.18, ease: [0.22, 1, 0.36, 1] }}
+            className="mt-1 ml-1.5 space-y-1.5 overflow-hidden border-l border-(--line) pl-2.5"
+          >
+            {steps.map((s, i) =>
+              s.kind === 'thought' ? (
+                <ThoughtStep key={i} step={s} />
+              ) : s.kind === 'notice' ? (
+                <NoticeStep key={i} step={s} />
+              ) : (
+                <ToolStep key={i} step={s} onApprove={onApprove} />
+              )
+            )}
+          </motion.ul>
+        )}
+      </AnimatePresence>
+    </div>
   );
 }
 
@@ -40,40 +158,128 @@ function AssistantMark() {
   return <span className="mt-2 inline-block h-1.5 w-1.5 shrink-0 rounded-full bg-(--accent)" aria-hidden />;
 }
 
-function Timestamp({ date, align = 'left' }: { date: Date; align?: 'left' | 'right' }) {
+/** The time, and for an answer the tokens its model calls used ("4.1k in (3.2k cached) · 380 out"). */
+function Timestamp({ date, align = 'left', usage }: { date: Date; align?: 'left' | 'right'; usage?: Message['usage'] }) {
   return (
     <div className={`mt-1 text-[10.5px] text-(--ink-mute) ${align === 'right' ? 'text-right' : ''}`}>
       {date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+      {usage && <span title="Tokens the provider reported for this answer"> · {formatUsage(usage)}</span>}
     </div>
   );
 }
 
-function MessageRow({ message, isFirst }: { message: Message; isFirst: boolean }) {
+/** A command's outcome: a muted line between rules, not a bubble. */
+function NoticeRow({ message }: { message: Message }) {
+  return (
+    <div className="flex items-start gap-2 text-[11.5px] text-(--ink-mute)">
+      <span className="mt-2 h-px flex-1 bg-(--line)" />
+      <div className="max-w-[85%] text-center whitespace-pre-line">
+        {message.content}
+        {message.usage && <div className="text-[10.5px]">{formatUsage(message.usage)}</div>}
+      </div>
+      <span className="mt-2 h-px flex-1 bg-(--line)" />
+    </div>
+  );
+}
+
+/** The run has made many rounds of tool calls without an answer and waits: keep going, or stop there. */
+function ContinuePrompt({ rounds, onRespond }: { rounds: number; onRespond: (keepGoing: boolean) => void }) {
+  return (
+    <div className="rounded-xl border border-(--line) bg-(--bg-raised) px-3 py-2.5">
+      <p className="mb-2 text-[12.5px] text-(--ink-soft)">
+        {rounds} rounds of tool calls and no answer yet. Keep going, or stop here? You can also send a message to steer it.
+      </p>
+      <div className="flex flex-wrap gap-1.5">
+        <button
+          type="button"
+          onClick={() => onRespond(true)}
+          className="rounded-full bg-(--accent) px-3 py-1 text-[12px] text-(--accent-ink) hover:opacity-90"
+        >
+          Keep going
+        </button>
+        <button
+          type="button"
+          onClick={() => onRespond(false)}
+          className="rounded-full border border-(--line) px-3 py-1 text-[12px] text-(--ink-soft) hover:bg-(--bg-sunken)"
+        >
+          Stop here
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/** Commands matching what follows the `/`, above the composer. */
+function CommandSuggestions({ commands, picked, onPick }: { commands: CommandInfo[]; picked: number; onPick: (c: CommandInfo) => void }) {
+  return (
+    <ul role="listbox" className="absolute inset-x-0 bottom-full mb-1.5 overflow-hidden rounded-xl border border-(--line) bg-(--bg-raised) py-1">
+      {commands.map((c, i) => (
+        <li key={c.name} role="option" aria-selected={i === picked}>
+          <button
+            type="button"
+            onMouseDown={(e) => e.preventDefault()} // keep the textarea focused
+            onClick={() => onPick(c)}
+            className={`flex w-full items-baseline gap-2 px-3 py-1.5 text-left ${i === picked ? 'bg-(--accent-soft)' : 'hover:bg-(--bg-sunken)'}`}
+          >
+            <span className="shrink-0 text-[12.5px] text-(--ink)">{c.usage}</span>
+            <span className="min-w-0 truncate text-[11.5px] text-(--ink-mute)">{c.description}</span>
+          </button>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+function MessageRow({
+  message,
+  isFirst,
+  showThoughts,
+  onEditQueued,
+  onApprove,
+}: {
+  message: Message;
+  isFirst: boolean;
+  showThoughts: boolean;
+  onEditQueued: () => void;
+  onApprove: (decision: ApprovalDecision) => void;
+}) {
+  if (message.notice) return <NoticeRow message={message} />;
   const separator = message.role === 'user' && !isFirst;
   if (message.role === 'user') {
     return (
       <div className={separator ? 'mt-5 border-t border-(--line) pt-5' : ''}>
         <div className="flex justify-end">
-          <div className="max-w-[85%] rounded-2xl rounded-br-md bg-(--user-bubble) px-3.5 py-2 text-[13.5px] break-words whitespace-pre-wrap text-(--ink)">
+          <div
+            className={`max-w-[85%] rounded-2xl rounded-br-md px-3.5 py-2 text-[13.5px] break-words whitespace-pre-wrap text-(--ink) ${
+              message.queued ? 'border border-dashed border-(--line-strong) bg-(--bg-raised)' : 'bg-(--user-bubble)'
+            }`}
+          >
             {message.content}
           </div>
         </div>
-        <Timestamp date={message.timestamp} align="right" />
+        {message.queued ? (
+          <div className="mt-1 flex items-center justify-end gap-2 text-[10.5px] text-(--ink-mute)">
+            <span>Queued · read after the current step</span>
+            <button type="button" onClick={onEditQueued} className="text-(--accent) hover:underline">
+              Edit
+            </button>
+          </div>
+        ) : (
+          <Timestamp date={message.timestamp} align="right" />
+        )}
       </div>
     );
   }
 
   const hasContent = message.content.length > 0;
-  const activityOnly = !hasContent && (message.activity?.length ?? 0) > 0;
-  const thinking = !hasContent && !activityOnly;
+  const steps = (message.steps ?? []).filter((s) => showThoughts || s.kind !== 'thought');
+  const thinking = !hasContent && steps.length === 0;
 
   return (
     <div className="flex gap-2">
       <AssistantMark />
       <div className="min-w-0 flex-1">
-        {message.activity && message.activity.length > 0 && <div className="mb-1.5">
-          <ActivityList lines={message.activity} />
-        </div>}
+        {steps.length > 0 && <StepsBlock steps={steps} working={Boolean(message.streaming)} hasContent={hasContent} onApprove={onApprove} />}
         {thinking && message.streaming && <TypingDots />}
         {hasContent && (
           <div
@@ -83,7 +289,7 @@ function MessageRow({ message, isFirst }: { message: Message; isFirst: boolean }
             dangerouslySetInnerHTML={{ __html: renderMarkdown(message.content) }}
           />
         )}
-        {(hasContent || activityOnly) && <Timestamp date={message.timestamp} />}
+        {!message.streaming && (hasContent || steps.length > 0) && <Timestamp date={message.timestamp} usage={message.usage} />}
       </div>
     </div>
   );
@@ -111,14 +317,19 @@ function EmptyChat() {
 }
 
 export function ChatArea({ model }: { model: AppModel }) {
-  const { messages, isLoading, sendMessage, stop } = model;
+  const { messages, isLoading, sendMessage, editQueued, stop, respondToApproval, continuePrompt, respondToContinue, settings, commands } = model;
   const [draft, setDraft] = useState('');
+  const [hint, setHint] = useState<string | null>(null); // why a command did not run
+  const [picked, setPicked] = useState(0);
+  const [dismissed, setDismissed] = useState(false);
+  // The prefix typed before ↑/↓ loaded a suggestion into the draft; keeps the list open on it until the next keystroke
+  const [browsing, setBrowsing] = useState<string | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const taRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
     listRef.current?.scrollTo({ top: listRef.current.scrollHeight, behavior: 'smooth' });
-  }, [messages, isLoading]);
+  }, [messages, isLoading, continuePrompt]);
 
   useEffect(() => {
     const ta = taRef.current;
@@ -132,11 +343,45 @@ export function ChatArea({ model }: { model: AppModel }) {
   const anyStreaming = messages.some((m) => m.streaming);
   const showLoadingRow = isLoading && !anyStreaming;
 
-  const send = () => {
-    const text = draft.trim();
-    if (!text || isLoading) return;
-    sendMessage(text);
+  // While a run is in flight a sent message waits in the steering slot (see AppModel.sendMessage)
+  const send = (value = draft) => {
+    const text = value.trim();
+    if (!text) return;
+    setBrowsing(null);
+    const refused = sendMessage(text);
+    if (refused) {
+      setDraft(value);
+      setHint(refused);
+      return;
+    }
     setDraft('');
+    setHint(null);
+  };
+
+  const changeDraft = (value: string) => {
+    setDraft(value);
+    setHint(null);
+    setDismissed(false);
+    setPicked(0);
+    setBrowsing(null);
+  };
+
+  // `/` plus letters and nothing else: suggest the matching commands
+  const typed = browsing ?? /^\/([a-z]*)$/i.exec(draft)?.[1].toLowerCase();
+  const suggestions = typed !== undefined && !dismissed ? commands.filter((c) => c.name.startsWith(typed)) : [];
+  /** Enter on a suggestion runs it, unless it needs arguments (then it is completed for typing them). */
+  const pick = (c: CommandInfo, run: boolean) => {
+    if (run && !c.needsArgs) send(`/${c.name}`);
+    else changeDraft(`/${c.name} `);
+    taRef.current?.focus();
+  };
+
+  const pullQueued = () => {
+    const text = editQueued();
+    setBrowsing(null);
+    if (text) setDraft((d) => (d.trim() ? `${text}
+${d}` : text));
+    taRef.current?.focus();
   };
 
   return (
@@ -148,41 +393,78 @@ export function ChatArea({ model }: { model: AppModel }) {
           <div>
             {messages.map((m, i) => (
               <div key={m.id} className={i > 0 ? 'mt-4' : ''}>
-                <MessageRow message={m} isFirst={i === 0} />
+                <MessageRow message={m} isFirst={i === 0} showThoughts={settings.showReasoning} onEditQueued={pullQueued} onApprove={respondToApproval} />
               </div>
             ))}
             {showLoadingRow && <div className={messages.length > 0 ? 'mt-4' : ''}><LoadingRow /></div>}
+            {continuePrompt && <div className="mt-4"><ContinuePrompt rounds={continuePrompt.rounds} onRespond={respondToContinue} /></div>}
           </div>
         )}
       </div>
 
       <div className="shrink-0 border-t border-(--line) px-3 py-2.5">
-        <div className="flex items-end gap-2 rounded-2xl border border-(--line) bg-(--bg-raised) px-3 py-2">
+        <div className="relative flex items-end gap-2 rounded-2xl border border-(--line) bg-(--bg-raised) px-3 py-2">
+          {suggestions.length > 0 && <CommandSuggestions commands={suggestions} picked={picked} onPick={(c) => pick(c, true)} />}
           <textarea
             ref={taRef}
             value={draft}
-            disabled={isLoading}
-            onChange={(e) => setDraft(e.target.value)}
+            onChange={(e) => changeDraft(e.target.value)}
             onKeyDown={(e) => {
+              if (suggestions.length > 0) {
+                if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+                  e.preventDefault();
+                  // Load the highlighted command into the draft, ready for arguments to be appended
+                  const step = e.key === 'ArrowDown' ? 1 : -1;
+                  const next = (Math.min(picked, suggestions.length - 1) + step + suggestions.length) % suggestions.length;
+                  setPicked(next);
+                  setBrowsing(typed ?? '');
+                  setDraft(`/${suggestions[next].name} `);
+                  setHint(null);
+                  return;
+                }
+                if (e.key === 'Tab' || (e.key === 'Enter' && !e.shiftKey)) {
+                  e.preventDefault();
+                  pick(suggestions[Math.min(picked, suggestions.length - 1)], e.key === 'Enter');
+                  return;
+                }
+                if (e.key === 'Escape') {
+                  e.preventDefault();
+                  setDismissed(true);
+                  return;
+                }
+              }
               if (e.key === 'Enter' && !e.shiftKey) {
                 e.preventDefault();
                 send();
               }
             }}
-            placeholder="Ask about a course…"
+            placeholder={isLoading ? 'Add a correction or detail…' : 'Ask about a course, or / for commands'}
             rows={1}
             className="max-h-[88px] min-h-[20px] flex-1 resize-none bg-transparent text-[13.5px] leading-[18px] outline-none placeholder:text-(--ink-mute) disabled:opacity-60"
           />
-          <button
-            type="button"
-            aria-label={isLoading ? 'Stop' : 'Send'}
-            onClick={isLoading ? stop : send}
-            disabled={!isLoading && draft.trim() === ''}
-            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-(--accent) text-(--accent-ink) transition-opacity disabled:opacity-30"
-          >
-            {isLoading ? <Square size={13} fill="currentColor" /> : <ArrowUp size={16} strokeWidth={2} />}
-          </button>
+          {isLoading && (
+            <button
+              type="button"
+              aria-label="Stop"
+              onClick={stop}
+              className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-(--line-strong) text-(--ink-soft) hover:bg-(--bg-sunken)"
+            >
+              <Square size={12} fill="currentColor" />
+            </button>
+          )}
+          {(!isLoading || draft.trim() !== '') && (
+            <button
+              type="button"
+              aria-label={isLoading ? 'Queue message' : 'Send'}
+              onClick={() => send()}
+              disabled={draft.trim() === ''}
+              className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-(--accent) text-(--accent-ink) transition-opacity disabled:opacity-30"
+            >
+              <ArrowUp size={16} strokeWidth={2} />
+            </button>
+          )}
         </div>
+        {hint && <p className="mt-1 px-1 text-[11px] text-(--warn)">{hint}</p>}
       </div>
     </div>
   );

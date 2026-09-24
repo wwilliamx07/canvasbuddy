@@ -17,22 +17,15 @@ import type {
   ModuleNode,
   PageRow,
 } from './model';
+import { FRESHNESS_FIELDS } from './model';
+import type { CourseListRow } from '../db/rows';
 
 const EMPTY_STATS: GraphStats = { courseCount: 0, moduleCount: 0, itemCount: 0, assignmentCount: 0, fileCount: 0, chunkCount: 0 };
 
-/** The course-scoped collections, in the order the sheet lists them. */
-const COURSE_COLLECTIONS: Array<{ kind: CollectionKind; label: string }> = [
-  { kind: 'modules', label: 'Modules & items' },
-  { kind: 'assignments', label: 'Assignments' },
-  { kind: 'files', label: 'Files' },
-  { kind: 'pages', label: 'Pages' },
-  { kind: 'home', label: 'Home page' },
-  { kind: 'submissions', label: 'Submissions' },
-  { kind: 'announcements', label: 'Announcements' },
-  { kind: 'discussions', label: 'Discussions' },
-  { kind: 'quizzes', label: 'Quizzes' },
-  { kind: 'syllabus', label: 'Syllabus' },
-];
+/** The course-scoped collections, in the order the sheet lists them, labelled as in Settings → Freshness. */
+const COURSE_COLLECTIONS: Array<{ kind: CollectionKind; label: string }> = (
+  ['modules', 'assignments', 'files', 'pages', 'home', 'submissions', 'announcements', 'discussions', 'quizzes', 'syllabus'] as const
+).map((kind) => ({ kind, label: FRESHNESS_FIELDS.find((f) => f.key === kind)?.label ?? kind }));
 
 const ITEM_TYPES: ReadonlySet<string> = new Set(['File', 'Page', 'Assignment', 'Discussion', 'Quiz', 'ExternalUrl', 'ExternalTool', 'SubHeader']);
 
@@ -71,23 +64,26 @@ function nodeName(node: MemoryNode): string {
   }
 }
 
-function toCourseSummary(row: any): CourseSummary {
+function toCourseSummary(row: CourseListRow): CourseSummary {
   return {
-    course_id: String(row.course_id),
+    course_id: row.course_id,
     name: row.name,
-    course_code: row.course_code ?? null,
-    term: row.term ?? null,
-    module_count: Number(row.module_count || 0),
-    assignment_count: Number(row.assignment_count || 0),
-    indexed_document_count: Number(row.indexed_document_count || 0),
+    course_code: row.course_code,
+    term: row.term,
+    module_count: row.module_count,
+    assignment_count: row.assignment_count,
+    indexed_document_count: row.indexed_document_count,
   };
 }
 
-function toSubmissionState(state: unknown): AssignmentRow['submission_state'] {
+function toSubmissionState(state: string | null | undefined): AssignmentRow['submission_state'] {
   if (state === 'graded' || state === 'unsubmitted') return state;
   if (state === 'submitted' || state === 'pending_review') return 'submitted';
   return null;
 }
+
+/** The model speaks ISO strings; PGlite hands `TIMESTAMPTZ` back as `Date`. */
+const iso = (d: Date | null): string | null => (d ? d.toISOString() : null);
 
 async function loadCourseMemory(course: CourseSummary): Promise<CourseMemory> {
   const courseId = course.course_id;
@@ -103,29 +99,29 @@ async function loadCourseMemory(course: CourseSummary): Promise<CourseMemory> {
   ]);
 
   // `indexed` for every node comes from the documents table, keyed by doc id
-  const indexedDocs = new Set<string>(fileRows.filter((f: any) => Number(f.total_chunks) > 0).map((f: any) => String(f.file_id)));
+  const indexedDocs = new Set(fileRows.filter((f) => f.total_chunks > 0).map((f) => f.file_id));
 
   const modules: ModuleNode[] = [];
   const byModule = new Map<string, ModuleNode>();
-  for (const n of hierarchy?.treeNodes ?? []) {
+  for (const n of hierarchy.treeNodes) {
     if (n.node_type === 'module') {
-      const m: ModuleNode = { node_type: 'module', node_id: String(n.node_id), label: n.label, items: [] };
+      const m: ModuleNode = { node_type: 'module', node_id: n.node_id, label: n.label, items: [] };
       modules.push(m);
       byModule.set(m.node_id, m);
     }
   }
-  for (const n of hierarchy?.treeNodes ?? []) {
+  for (const n of hierarchy.treeNodes) {
     if (n.node_type !== 'module_item') continue;
-    const parent = byModule.get(String(n.parent_module_id));
+    const parent = byModule.get(n.parent_module_id);
     if (!parent) continue;
-    const item_type = (ITEM_TYPES.has(n.item_type) ? n.item_type : 'ExternalUrl') as ModuleItemType;
+    const item_type = (n.item_type && ITEM_TYPES.has(n.item_type) ? n.item_type : 'ExternalUrl') as ModuleItemType;
     const item: ModuleItemNode = {
       node_type: 'module_item',
-      node_id: String(n.node_id),
+      node_id: n.node_id,
       label: n.label,
       item_type,
-      content_ref: n.content_ref != null ? String(n.content_ref) : null,
-      html_url: n.html_url ?? null,
+      content_ref: n.content_ref,
+      html_url: n.html_url,
       indexed: false,
     };
     const docId = docIdForNode(item, courseId);
@@ -133,41 +129,41 @@ async function loadCourseMemory(course: CourseSummary): Promise<CourseMemory> {
     parent.items.push(item);
   }
 
-  const assignments: AssignmentRow[] = assignmentRows.map((a: any) => ({
+  const assignments: AssignmentRow[] = assignmentRows.map((a) => ({
     node_type: 'assignment',
-    assignment_id: String(a.assignment_id),
+    assignment_id: a.assignment_id,
     name: a.name,
-    due_at: a.due_at ?? null,
-    points_possible: a.points_possible != null ? Number(a.points_possible) : null,
-    html_url: a.html_url ?? null,
+    due_at: iso(a.due_at),
+    points_possible: a.points_possible,
+    html_url: a.html_url,
     submission_state: toSubmissionState(a.submission_state),
-    score: a.score != null ? Number(a.score) : null,
-    indexed: Boolean(a.description_indexed),
+    score: a.score ?? null,
+    indexed: a.description_indexed,
   }));
 
-  const pages: PageRow[] = pageRows.map((p: any) => ({
+  const pages: PageRow[] = pageRows.map((p) => ({
     node_type: 'page',
-    page_url: String(p.page_url),
+    page_url: p.page_url,
     title: p.title,
-    front_page: Boolean(p.front_page),
-    html_url: p.html_url ?? null,
-    indexed: Boolean(p.indexed),
+    front_page: p.front_page,
+    html_url: p.html_url,
+    indexed: p.indexed,
   }));
 
   const moduleFileIds = new Set<string>();
   for (const m of modules) for (const it of m.items) if (it.item_type === 'File' && it.content_ref) moduleFileIds.add(it.content_ref);
-  const courseFiles = fileRows.filter((f: any) => f.source_type === 'file');
+  const courseFiles = fileRows.filter((f) => f.source_type === 'file');
   const looseFiles: FileRow[] = courseFiles
-    .filter((f: any) => !moduleFileIds.has(String(f.file_id)))
-    .map((f: any) => ({
+    .filter((f) => !moduleFileIds.has(f.file_id))
+    .map((f) => ({
       node_type: 'file',
-      file_id: String(f.file_id),
-      display_name: f.display_name || f.filename || String(f.file_id),
-      content_type: f.content_type ?? null,
-      size: f.size != null ? Number(f.size) : null,
-      total_chunks: Number(f.total_chunks || 0),
-      html_url: f.html_url ?? null,
-      indexed: Number(f.total_chunks) > 0,
+      file_id: f.file_id,
+      display_name: f.display_name || f.filename || f.file_id,
+      content_type: f.content_type,
+      size: f.size,
+      total_chunks: f.total_chunks,
+      html_url: f.html_url,
+      indexed: f.total_chunks > 0,
     }));
 
   const counts: Partial<Record<CollectionKind, number | null>> = {
@@ -176,7 +172,7 @@ async function loadCourseMemory(course: CourseSummary): Promise<CourseMemory> {
     files: courseFiles.length,
     pages: pages.length,
     home: null,
-    submissions: assignmentRows.filter((a: any) => a.submission_state != null).length,
+    submissions: assignmentRows.filter((a) => a.submission_state != null).length,
     announcements: announcementRows.length,
     discussions: discussionRows.length,
     quizzes: quizRows.length,
@@ -197,25 +193,25 @@ async function loadCourseMemory(course: CourseSummary): Promise<CourseMemory> {
     assignments,
     pages,
     looseFiles,
-    announcements: announcementRows.map((a: any) => ({
-      announcement_id: String(a.announcement_id),
+    announcements: announcementRows.map((a) => ({
+      announcement_id: a.announcement_id,
       title: a.title,
-      posted_at: a.posted_at ?? null,
-      author: a.author ?? null,
+      posted_at: iso(a.posted_at),
+      author: a.author,
     })),
-    discussions: discussionRows.map((d: any) => ({
-      discussion_id: String(d.discussion_id),
+    discussions: discussionRows.map((d) => ({
+      discussion_id: d.discussion_id,
       title: d.title,
-      reply_count: Number(d.reply_count || 0),
-      last_reply_at: d.last_reply_at ?? null,
-      replies_read: Boolean(d.replies_read),
+      reply_count: d.reply_count ?? 0,
+      last_reply_at: iso(d.last_reply_at),
+      replies_read: d.replies_read,
     })),
-    quizzes: quizRows.map((z: any) => ({
-      quiz_id: String(z.quiz_id),
+    quizzes: quizRows.map((z) => ({
+      quiz_id: z.quiz_id,
       title: z.title,
-      due_at: z.due_at ?? null,
-      points_possible: z.points_possible != null ? Number(z.points_possible) : null,
-      question_count: z.question_count != null ? Number(z.question_count) : null,
+      due_at: iso(z.due_at),
+      points_possible: z.points_possible,
+      question_count: z.question_count,
     })),
     hasSyllabus: syllabus != null,
   };
@@ -311,11 +307,12 @@ export function useMemoryExplorer(enabled: boolean): MemoryModel & { reload: () 
       .then((rows) => {
         if (cancelled) return;
         setNodeChunks(
-          rows.map((r: any) => ({
-            chunk_id: String(r.chunk_id),
-            chunk_index: Number(r.chunk_index),
-            page_number: r.page_number != null ? Number(r.page_number) : null,
-            page_end: r.page_end != null ? Number(r.page_end) : null,
+          rows.map((r) => ({
+            chunk_id: r.chunk_id,
+            chunk_index: r.chunk_index,
+            page_number: r.page_number,
+            page_end: r.page_end,
+            page_kind: r.page_kind || 'page',
             content: r.content,
           }))
         );

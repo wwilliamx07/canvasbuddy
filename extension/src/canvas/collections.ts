@@ -1,4 +1,5 @@
 import {
+  clearSyncState,
   ensureCurrent,
   type CollectionKind,
   type CollectionSpec,
@@ -12,6 +13,7 @@ import { canvasGet, fetchAllPages, CanvasHttpError } from './http';
 import { withTransaction, type Queryable } from '../db/pglite';
 import {
   upsertCourses,
+  pruneCourses,
   upsertAndPruneModules,
   upsertAndPruneModuleItems,
   upsertAndPruneAssignments,
@@ -36,7 +38,7 @@ import {
   docIdFor,
   upsertAndPruneKnownFiles,
   upsertDocumentChunksIncremental,
-  getChunksMissingEmbedding,
+  chunksToEmbed,
   setChunkEmbeddings,
 } from '../db/rag';
 import { batchEmbed, resolveEmbeddingModel } from '../embeddings/embeddingClient';
@@ -60,6 +62,7 @@ import type {
   CanvasDiscussionEntry,
   ShapedDiscussion,
   CanvasQuiz,
+  ContentLink,
   ShapedQuiz,
 } from '../types/canvas';
 import { htmlToText } from '../utils/textExtractor';
@@ -113,11 +116,16 @@ const courses: CollectionSpec = {
         if (!(e instanceof CanvasHttpError)) throw e;
       }
     }
-    await withTransaction(async (tx) => {
+    // The roster is the complete list of active courses: one that left it (dropped, term over) goes
+    // with everything remembered under it, and its sync stamps, so it is not in the next roster
+    const pruned = await withTransaction(async (tx) => {
       await upsertCourses(valid, tx);
       for (const [courseId, list] of tabs) await replaceCourseTabs(courseId, list, tx);
+      const gone = await pruneCourses(valid.map((c) => String(c.id)), tx);
+      for (const courseId of gone) await clearSyncState(`course:${courseId}`, tx);
+      return gone;
     });
-    return { summary: `${valid.length} active courses` };
+    return { summary: `${valid.length} active courses${pruned.length ? `, ${pruned.length} pruned` : ''}` };
   },
 };
 
@@ -238,7 +246,13 @@ const assignments: CollectionSpec = {
       // Some courses restrict assignment groups; the plain listing is the fallback (larger payload)
       list = await fetchAllPages<CanvasAssignment>(`/courses/${courseId}/assignments?per_page=100`, `assignments for course ${courseId}`);
     }
-    const r = await withTransaction((tx) => upsertAndPruneAssignments(courseId, list, tx));
+    const r = await withTransaction(async (tx) => {
+      // The fallback listing carries descriptions: store them as text with their links recorded, like every other body
+      for (const a of list) {
+        if (typeof a.description === 'string') a.description = (await ingestHtml(courseId, 'assignment', String(a.id), a.description, tx)).text;
+      }
+      return upsertAndPruneAssignments(courseId, list, tx);
+    });
     return { summary: `${r.upserted} assignments, ${r.pruned} pruned` };
   },
 };
@@ -349,7 +363,7 @@ async function shapeAnnouncement(courseId: string, a: CanvasAnnouncement, tx: Qu
     title: a.title || '(untitled)',
     posted_at: a.posted_at ?? null,
     author: a.author?.display_name || a.user_name || null,
-    text: clip(await ingestHtml(courseId, 'announcement', String(a.id), a.message, tx), ANNOUNCEMENT_TEXT_MAX) || '',
+    text: clip((await ingestHtml(courseId, 'announcement', String(a.id), a.message, tx)).text, ANNOUNCEMENT_TEXT_MAX) || '',
     html_url: a.html_url || null,
   };
 }
@@ -390,8 +404,6 @@ export function plannerWindow(now = new Date()): { start: Date; end: Date } {
   return { start, end };
 }
 
-const isoDate = (d: Date) => d.toISOString().slice(0, 10);
-
 interface CanvasPlannerItem {
   plannable_type: string;
   plannable_id?: number | string;
@@ -425,10 +437,13 @@ export function shapePlannerItem(p: CanvasPlannerItem): ShapedPlannerItem {
   };
 }
 
-/** Live, shaped, not stored — for get_planner requests outside the cached window. */
+/**
+ * Live, shaped, not stored — for get_planner requests outside the cached window. The bounds go as
+ * full timestamps (Canvas takes ISO 8601): a date alone would be the UTC day, not the student's.
+ */
 export async function fetchPlannerRange(start: Date, end: Date): Promise<ShapedPlannerItem[]> {
-  const list = await fetchAllPages<CanvasPlannerItem>(
-    `/planner/items?start_date=${isoDate(start)}&end_date=${isoDate(end)}&per_page=100`, 'planner items');
+  const q = `start_date=${encodeURIComponent(start.toISOString())}&end_date=${encodeURIComponent(end.toISOString())}`;
+  const list = await fetchAllPages<CanvasPlannerItem>(`/planner/items?${q}&per_page=100`, 'planner items');
   return list.map(shapePlannerItem);
 }
 
@@ -505,9 +520,9 @@ function shapeMessages(thread: CanvasConversation): ShapedMessage[] {
  * Returns how many entries were embedded.
  */
 async function embedThreadIfNeeded(docId: string, header: string, settings: AppSettings): Promise<number> {
-  const missing = await getChunksMissingEmbedding(docId);
-  if (missing.length === 0) return 0;
   const model = resolveEmbeddingModel(settings);
+  const missing = await chunksToEmbed(docId, model);
+  if (missing.length === 0) return 0;
   const vectors = await batchEmbed(missing.map((m) => `${header}\n${m.content}`), settings, 'document');
   await setChunkEmbeddings(docId, missing.map((m, i) => ({ chunkId: m.chunk_id, embedding: vectors[i] })), model);
   return missing.length;
@@ -536,24 +551,28 @@ const inbox: CollectionSpec = {
     const byId = new Map(shaped.map((c) => [c.conversation_id, c]));
     for (const id of staleThreads.slice(0, INBOX_THREAD_FETCH_CAP)) {
       const conv = byId.get(id);
-      const thread = await canvasGet<CanvasConversation>(`/conversations/${id}`, `conversation ${id}`);
+      // Canvas marks an unread conversation read when it is fetched unless told not to
+      const thread = await canvasGet<CanvasConversation>(`/conversations/${id}?auto_mark_as_read=false`, `conversation ${id}`);
       const messages = shapeMessages(thread);
-      await withTransaction((tx) => upsertMessages(id, messages, conv?.last_message_at ?? null, tx));
       const subject = conv?.subject || thread.subject || `Conversation ${id}`;
       const docId = docIdFor('conversation', id);
-      await upsertDocumentChunksIncremental({
-        docId,
-        sourceType: 'conversation',
-        courseId: conv?.course_id ?? null,
-        title: `Inbox: ${subject}`,
-        version: conv?.last_message_at ?? '1',
-        embeddingModel: null,
-        chunks: messages.map((m, i) => ({
-          chunkId: `${docId}:msg:${m.message_id}`,
-          chunkIndex: i,
-          content: `${m.author_name || 'Unknown'} (${(m.created_at || '').slice(0, 10)}): ${m.body}`,
-          embedding: null,
-        })),
+      // Messages, thread stamp and document commit together: a stamped thread is never missing its chunks
+      await withTransaction(async (tx) => {
+        await upsertMessages(id, messages, conv?.last_message_at ?? null, tx);
+        await upsertDocumentChunksIncremental({
+          docId,
+          sourceType: 'conversation',
+          courseId: conv?.course_id ?? null,
+          title: `Inbox: ${subject}`,
+          version: conv?.last_message_at ?? '1',
+          embeddingModel: null,
+          chunks: messages.map((m, i) => ({
+            chunkId: `${docId}:msg:${m.message_id}`,
+            chunkIndex: i,
+            content: `${m.author_name || 'Unknown'} (${(m.created_at || '').slice(0, 10)}): ${m.body}`,
+            embedding: null,
+          })),
+        }, tx);
       });
       threads++;
     }
@@ -595,9 +614,7 @@ const home: CollectionSpec = {
     const links = await withTransaction(async (tx) => {
       await setFrontPage(courseId, page, tx);
       if (!page?.url) return 0;
-      const { links } = htmlToTextWithLinks(page.body || '', courseId);
-      await storeContentLinks(courseId, 'page', page.url, links, tx);
-      return links.length;
+      return (await ingestHtml(courseId, 'page', page.url, page.body, tx)).links.length;
     });
     return {
       fingerprint: page ? page.updated_at || 'unknown' : 'none',
@@ -622,7 +639,7 @@ async function shapeDiscussion(courseId: string, t: CanvasDiscussionTopic, tx: Q
     posted_at: t.posted_at ?? null,
     last_reply_at: t.last_reply_at ?? null,
     reply_count: t.discussion_subentry_count ?? 0,
-    message: clip(await ingestHtml(courseId, 'discussion', String(t.id), t.message, tx), DISCUSSION_MESSAGE_MAX) || '',
+    message: clip((await ingestHtml(courseId, 'discussion', String(t.id), t.message, tx)).text, DISCUSSION_MESSAGE_MAX) || '',
     html_url: t.html_url || null,
     pinned: Boolean(t.pinned),
     locked: Boolean(t.locked),
@@ -654,19 +671,25 @@ const discussions: CollectionSpec = {
   },
 };
 
-/** The reply tree flattened in reading order, each entry knowing whom it answers. */
+type ThreadEntry = { id: string; author: string; parentAuthor: string | null; createdAt: string; text: string };
+
+/**
+ * The reply tree flattened in reading order, each entry knowing whom it answers. Entry HTML is
+ * converted like every other body: text with link markers, and the links collected into `links`.
+ */
 function flattenEntries(
   entries: CanvasDiscussionEntry[],
-  names: Map<string, string>,
-  parentAuthor: string | null,
-  out: Array<{ id: string; author: string; parentAuthor: string | null; createdAt: string; text: string }>
+  ctx: { courseId: string; names: Map<string, string>; out: ThreadEntry[]; links: ContentLink[] },
+  parentAuthor: string | null = null
 ): void {
   for (const e of entries) {
     if (e.deleted) continue;
-    const author = e.user_id != null ? names.get(String(e.user_id)) || 'Unknown' : 'Unknown';
-    const text = htmlToText(e.message || '').trim();
-    if (text) out.push({ id: String(e.id), author, parentAuthor, createdAt: e.created_at || '', text: clip(text, DISCUSSION_ENTRY_MAX)! });
-    if (e.replies?.length) flattenEntries(e.replies, names, author, out);
+    const author = e.user_id != null ? ctx.names.get(String(e.user_id)) || 'Unknown' : 'Unknown';
+    const { text: raw, links } = htmlToTextWithLinks(e.message || '', ctx.courseId);
+    const text = raw.trim();
+    ctx.links.push(...links);
+    if (text) ctx.out.push({ id: String(e.id), author, parentAuthor, createdAt: e.created_at || '', text: clip(text, DISCUSSION_ENTRY_MAX)! });
+    if (e.replies?.length) flattenEntries(e.replies, ctx, author);
   }
 }
 
@@ -684,8 +707,18 @@ export async function ensureDiscussionThread(courseId: string, discussionId: str
   const view = await canvasGet<CanvasDiscussionView>(
     `/courses/${courseId}/discussion_topics/${discussionId}/view`, `replies of discussion ${discussionId}`);
   const names = new Map((view.participants || []).map((p) => [String(p.id), p.display_name || 'Unknown']));
-  const entries: Array<{ id: string; author: string; parentAuthor: string | null; createdAt: string; text: string }> = [];
-  flattenEntries(Array.isArray(view.view) ? view.view : [], names, null, entries);
+  const entries: ThreadEntry[] = [];
+  const found: ContentLink[] = [];
+  flattenEntries(Array.isArray(view.view) ? view.view : [], { courseId: String(courseId), names, out: entries, links: found });
+  // The replies' links, once each, recorded under the thread so what they point at becomes listable
+  const seen = new Set<string>();
+  const replyLinks: ContentLink[] = [];
+  for (const l of found) {
+    const key = `${l.to_type}:${l.to_ref}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    replyLinks.push({ ...l, position: replyLinks.length });
+  }
 
   const docId = docIdFor('discussion', discussionId);
   const topicDate = (topic.posted_at ? new Date(topic.posted_at).toISOString() : '').slice(0, 10);
@@ -703,18 +736,21 @@ export async function ensureDiscussionThread(courseId: string, discussionId: str
       embedding: null,
     })),
   ];
-  await upsertDocumentChunksIncremental({
-    docId,
-    sourceType: 'discussion',
-    courseId: String(courseId),
-    title: `Discussion: ${topic.title}`,
-    version,
-    embeddingModel: null,
-    htmlUrl: topic.html_url,
-    chunks,
-    pruneMissing: true,
+  await withTransaction(async (tx) => {
+    await upsertDocumentChunksIncremental({
+      docId,
+      sourceType: 'discussion',
+      courseId: String(courseId),
+      title: `Discussion: ${topic.title}`,
+      version,
+      embeddingModel: null,
+      htmlUrl: topic.html_url,
+      chunks,
+      pruneMissing: true,
+    }, tx);
+    await storeContentLinks(String(courseId), 'discussion_replies', discussionId, replyLinks, tx);
+    await setDiscussionRepliesSynced(discussionId, version, tx);
   });
-  await setDiscussionRepliesSynced(discussionId, version);
   return `Read ${entries.length} replies of "${topic.title}".`;
 }
 
@@ -742,7 +778,7 @@ async function shapeQuiz(courseId: string, z: CanvasQuiz, tx: Queryable): Promis
     unlock_at: z.unlock_at ?? null,
     lock_at: z.lock_at ?? null,
     published: z.published ?? true,
-    description: clip(await ingestHtml(courseId, 'quiz', String(z.id), z.description, tx), QUIZ_DESCRIPTION_MAX),
+    description: clip((await ingestHtml(courseId, 'quiz', String(z.id), z.description, tx)).text, QUIZ_DESCRIPTION_MAX),
     assignment_id: z.assignment_id != null ? String(z.assignment_id) : null,
     html_url: z.html_url || null,
     lock_explanation: z.locked_for_user ? clip(z.lock_explanation ? htmlToText(z.lock_explanation) : 'locked', 300) : null,
@@ -794,10 +830,13 @@ const syllabus: CollectionSpec = {
     const body = info.probeData !== undefined ? (info.probeData as string | null) : await fetchSyllabusBody(courseId);
     const fingerprint = syllabusFingerprint(body);
     const links = await withTransaction(async (tx) => {
-      await setCourseSyllabus(courseId, body, body ? fingerprint : null, tx);
-      if (!body) return 0;
-      const { links } = htmlToTextWithLinks(body, courseId);
-      await storeContentLinks(courseId, 'syllabus', courseId, links, tx);
+      if (!body) {
+        await setCourseSyllabus(courseId, null, null, tx);
+        return 0;
+      }
+      // Stored as text with link markers; the fingerprint is over the HTML so an unchanged body is recognised
+      const { text, links } = await ingestHtml(courseId, 'syllabus', courseId, body, tx);
+      await setCourseSyllabus(courseId, text, fingerprint, tx);
       return links.length;
     });
     return { fingerprint, summary: body ? `syllabus (${body.length} chars, ${links} links)` : 'no syllabus' };

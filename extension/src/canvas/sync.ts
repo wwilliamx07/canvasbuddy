@@ -1,6 +1,6 @@
 import type { AppSettings } from '../settings';
 import type { CanvasAssignment, CanvasFile, CanvasPage } from '../types/canvas';
-import { setAssignmentDescription, getCourseSyllabus } from '../db/graph';
+import { setAssignmentDescription, getCourseSyllabus, getDocumentContext } from '../db/graph';
 import {
   docIdFor,
   getDocumentCacheState,
@@ -8,24 +8,25 @@ import {
   storeChunksWithEmbeddings,
   type DocumentSourceType,
 } from '../db/rag';
-import { getDB } from '../db/pglite';
 import { batchEmbed, resolveEmbeddingModel } from '../embeddings/embeddingClient';
 import {
   extractStructuredFromFile,
   chunkStructuredDocument,
+  pageKindFor,
+  type PageKind,
   type StructuredPage,
 } from '../utils/textExtractor';
 import { CanvasHttpError, canvasGet } from './http';
 import { ingestHtml } from './links';
 
 /**
- * Just-in-time document indexing (files, wiki pages, assignment descriptions).
- * Collection syncs live in ./collections.ts; inbox threads are indexed there as part of the sync.
+ * Just-in-time document indexing (files, wiki pages, assignment descriptions, the syllabus).
+ * Collection syncs live in ./collections.ts; inbox and discussion threads are stored there as text.
  */
 
 export interface IndexTarget {
   sourceType: DocumentSourceType;
-  /** Canvas file id, page slug, or assignment id depending on sourceType */
+  /** Canvas file id, page slug, assignment id, or the course id for the syllabus, depending on sourceType */
   sourceId: string;
   courseId?: string | null;
 }
@@ -41,11 +42,11 @@ export interface IndexResult {
   htmlUrl?: string | null;
 }
 
-/** Human-readable page label for a chunk: "slide 4" or "slides 4-7". */
+/** Human-readable page label for a chunk: "slide 4", "slides 4-7", "section 2". */
 export function pageRangeLabel(
   pageNumber: number | null | undefined,
   pageEnd: number | null | undefined,
-  unit: 'page' | 'slide'
+  unit: PageKind
 ): string | null {
   if (pageNumber == null) return null;
   const end = pageEnd ?? pageNumber;
@@ -58,8 +59,8 @@ async function sha256Hex(text: string): Promise<string> {
 }
 
 /**
- * Just-in-time extraction and vector indexing of a Canvas document (file, wiki page, or
- * assignment description). Cache is keyed on the upstream version AND the embedding model.
+ * Just-in-time extraction and vector indexing of a Canvas document (file, wiki page, assignment
+ * description, or the syllabus). Cache is keyed on the upstream version AND the embedding model.
  * On re-index, chunks whose text is unchanged keep their stored vector; only new or modified
  * chunks are sent to the embedding API.
  */
@@ -100,10 +101,9 @@ export async function indexDocumentJustInTime(target: IndexTarget, settings: App
   // Prepend a context header to what gets embedded (not to what is stored/displayed):
   // slide fragments like "- O(n log n)" mean little without the course and document they belong to.
   const header = await buildChunkHeader(source.docId, target, source.title);
-  const unit = target.sourceType === 'file' && source.title.toLowerCase().endsWith('.pptx') ? 'slide' : 'page';
   const embeddedTexts = toEmbed.map((i) => {
     const c = rawChunks[i];
-    const label = pageRangeLabel(c.pageNumber, c.pageEnd, unit);
+    const label = pageRangeLabel(c.pageNumber, c.pageEnd, source.pageKind);
     return `${header}${label ? ` · ${label}` : ''}\n${c.content}`;
   });
 
@@ -119,6 +119,7 @@ export async function indexDocumentJustInTime(target: IndexTarget, settings: App
     version: source.version,
     embeddingModel,
     htmlUrl: source.htmlUrl,
+    pageKind: source.pageKind,
     chunks: rawChunks.map((c, idx) => ({
       chunkIndex: c.chunkIndex,
       pageNumber: c.pageNumber,
@@ -141,7 +142,7 @@ export async function indexDocumentJustInTime(target: IndexTarget, settings: App
   };
 }
 
-/** Backward-compatible wrapper for Canvas files */
+/** Metadata of a document to index plus a lazy loader for its text. */
 interface DocumentSource {
   docId: string;
   title: string;
@@ -149,6 +150,8 @@ interface DocumentSource {
   version: string;
   htmlUrl?: string | null;
   courseId?: string | null;
+  /** What page_number counts in the loaded pages (PDF pages, PPTX slides, sections otherwise) */
+  pageKind: PageKind;
   loadPages: () => Promise<StructuredPage[]>;
 }
 
@@ -194,6 +197,7 @@ async function loadDocumentSource(target: IndexTarget): Promise<DocumentSource> 
       displayName: meta.display_name || filename,
       version: meta.modified_at || meta.updated_at || String(meta.size || '1'),
       htmlUrl: meta.url || null,
+      pageKind: pageKindFor(filename),
       loadPages: async () => {
         // `public_url` is a signed link that may live on a file CDN outside the origins the
         // extension was granted; if the browser refuses it, the file's own `url` on the Canvas
@@ -228,12 +232,13 @@ async function loadDocumentSource(target: IndexTarget): Promise<DocumentSource> 
     if (!courseId) throw new Error('course_id is required to index a page');
     const page = await fetchPage(courseId, sourceId);
     // The body is in hand: record its links now so what it points at becomes discoverable
-    const text = await ingestHtml(courseId, 'page', sourceId, page.body);
+    const { text } = await ingestHtml(courseId, 'page', sourceId, page.body);
     return {
       docId: docIdFor('page', sourceId, courseId),
       title: page.title || sourceId,
       version: page.updated_at || '1',
       htmlUrl: page.html_url || null,
+      pageKind: 'page',
       courseId: String(courseId),
       loadPages: async () => (text ? [{ pageNumber: 1, text }] : []),
     };
@@ -241,29 +246,30 @@ async function loadDocumentSource(target: IndexTarget): Promise<DocumentSource> 
 
   if (sourceType === 'assignment') {
     if (!courseId) throw new Error('course_id is required to index an assignment description');
-    const a = await fetchAssignmentWithDescription(courseId, sourceId);
-    const text = await ingestHtml(courseId, 'assignment', sourceId, a.description);
+    const { assignment: a, text } = await fetchAssignmentWithDescription(courseId, sourceId);
     return {
       docId: docIdFor('assignment', sourceId),
       title: a.name ? `${a.name} (assignment description)` : `Assignment ${sourceId}`,
       version: a.updated_at || '1',
       htmlUrl: a.html_url || null,
+      pageKind: 'page',
       courseId: String(courseId),
       loadPages: async () => (text ? [{ pageNumber: 1, text }] : []),
     };
   }
 
   if (sourceType === 'syllabus') {
-    // The body was stored by the syllabus collection (the tool ensured it before calling here)
+    // The syllabus collection stored the body as text and recorded its links (the tool ensured it before calling here)
     const course = String(courseId || sourceId);
     const syllabus = await getCourseSyllabus(course);
     if (!syllabus) throw new Error(`Course ${course} has no syllabus on its Syllabus tab.`);
-    const text = await ingestHtml(course, 'syllabus', course, syllabus.body);
+    const text = syllabus.body;
     return {
       docId: docIdFor('syllabus', course),
       title: 'Syllabus',
       version: syllabus.version,
       htmlUrl: null,
+      pageKind: 'page',
       courseId: course,
       loadPages: async () => (text ? [{ pageNumber: 1, text }] : []),
     };
@@ -295,37 +301,30 @@ async function fetchPage(courseId: string, slug: string): Promise<CanvasPage> {
 }
 
 /**
- * Fetches one assignment (the only listing that carries `description`) and caches the
- * description in the graph so get_assignment / indexing do not fetch it twice.
+ * Fetches one assignment (the only listing that carries `description`), records its links and
+ * caches the description as text in the graph so get_assignment / indexing do not fetch it twice.
  */
-export async function fetchAssignmentWithDescription(courseId: string, assignmentId: string): Promise<CanvasAssignment> {
+export async function fetchAssignmentWithDescription(
+  courseId: string,
+  assignmentId: string
+): Promise<{ assignment: CanvasAssignment; text: string }> {
   const a = await canvasGet<CanvasAssignment>(`/courses/${courseId}/assignments/${assignmentId}`, `assignment ${assignmentId}`);
-  await setAssignmentDescription(String(assignmentId), a.description ?? null, a.updated_at ?? null);
-  return a;
+  const { text } = await ingestHtml(courseId, 'assignment', String(assignmentId), a.description);
+  await setAssignmentDescription(String(assignmentId), text, a.updated_at ?? null);
+  return { assignment: a, text };
 }
+
+/** The module item type that lists a document of each kind (the syllabus is in no module). */
+const MODULE_ITEM_TYPE: Partial<Record<DocumentSourceType, 'File' | 'Page' | 'Assignment'>> = { file: 'File', page: 'Page', assignment: 'Assignment' };
 
 /**
  * "CSC236 · Week 3 · Lecture 5 slides" — the context that a bare chunk lacks.
  */
 async function buildChunkHeader(docId: string, target: IndexTarget, title: string): Promise<string> {
-  const db = await getDB();
-  const parts: string[] = [];
-
-  if (target.courseId) {
-    const c = await db.query<{ name: string; course_code: string | null }>(
-      'SELECT name, course_code FROM courses WHERE course_id = $1',
-      [String(target.courseId)]
-    );
-    if (c.rows[0]) parts.push(c.rows[0].course_code || c.rows[0].name);
-  }
-
-  const m = await db.query<{ name: string }>(
-    `SELECT m.name FROM module_items mi JOIN modules m ON m.module_id = mi.module_id
-     WHERE mi.content_ref = $1 ORDER BY m.position ASC LIMIT 1`,
-    [target.sourceType === 'file' ? docId : target.sourceId]
+  const { course, module } = await getDocumentContext(
+    target.courseId ?? null,
+    target.sourceType === 'file' ? docId : target.sourceId,
+    MODULE_ITEM_TYPE[target.sourceType] ?? null
   );
-  if (m.rows[0]) parts.push(m.rows[0].name);
-
-  parts.push(title);
-  return parts.join(' · ');
+  return [course, module, title].filter(Boolean).join(' · ');
 }

@@ -1,4 +1,5 @@
 import type { AppSettings } from '../settings';
+import type { JsonSchema, ToolSpec } from '../providers/types';
 import {
   ensureCollection,
   ensureCollections,
@@ -33,9 +34,9 @@ import {
   searchChunksHybrid,
   type DocumentSourceType,
 } from '../db/rag';
-import { getEmbedding } from '../embeddings/embeddingClient';
-import { ingestHtml } from '../canvas/links';
+import { getEmbedding, resolveEmbeddingModel } from '../embeddings/embeddingClient';
 import type { ShapedPlannerItem } from '../types/canvas';
+import type { ModuleItemListRow, ModuleListRow, PlannerListRow, QuizListRow } from '../db/rows';
 
 /**
  * The model's tools. All eight read the local graph; before reading, each brings the collections
@@ -43,45 +44,30 @@ import type { ShapedPlannerItem } from '../types/canvas';
  * cached data — `refresh` exists only to relay "the user says something changed".
  */
 
-export interface ToolParameter {
-  type: 'STRING' | 'INTEGER' | 'NUMBER' | 'BOOLEAN';
-  description: string;
-  enum?: string[];
-}
-
-export interface ToolConfig {
-  name: string;
-  description: string;
-  parameters: {
-    type: 'OBJECT';
-    properties: Record<string, ToolParameter>;
-    required?: string[];
-  };
-}
-
 export type ToolArgs = Record<string, string>;
 export type ToolFn = (args: ToolArgs, settings: AppSettings) => Promise<string>;
 
-const REFRESH_PARAM: ToolParameter = {
-  type: 'BOOLEAN',
+const REFRESH_PARAM: JsonSchema = {
+  type: 'boolean',
   description: 'Set true ONLY when the user says something changed or asks to re-check Canvas. Otherwise omit; the data is kept current automatically.',
 };
 
-export const TOOL_CONFIG: ToolConfig[] = [
+/** Parameters are JSON Schema; each adapter converts to its API's tool format. */
+export const TOOL_CONFIG: ToolSpec[] = [
   {
     name: 'list_content',
     description:
       'List what a course has. kind="courses": the roster with what each course\'s Home shows, whether it has a syllabus, and its nav bar incl. external tools (Piazza, recordings) to point the student to. "modules": structure only. "items": what sits inside modules (files, pages, assignments, quizzes, discussions) — the way to find a lecture by name or week. "files": every file the course is known to have, wherever it was found — the Files area if visible (often hidden from students, which is normal), modules, and links on the home page, syllabus, announcements, discussion topics, quiz descriptions and anything already read; linked_from says where. "pages": likewise for pages, with the syllabus document and the home page first. "assignments": names, due dates, points, optionally your submission. "quizzes": time limit, attempts, question count, availability, optionally your submission.',
     parameters: {
-      type: 'OBJECT',
+      type: 'object',
       properties: {
-        kind: { type: 'STRING', description: 'What to list', enum: ['courses', 'modules', 'items', 'assignments', 'quizzes', 'files', 'pages'] },
-        course_id: { type: 'STRING', description: 'Course id (from the course list). Required for everything except kind="courses".' },
-        search: { type: 'STRING', description: 'Case-insensitive substring of the name/title. Pass whenever the user named a topic, week or number.' },
-        module_id: { type: 'STRING', description: 'kind="items" only: restrict to one module.' },
-        bucket: { type: 'STRING', description: 'kind="assignments"/"quizzes": due-date filter. Default "upcoming" for assignments, "all" for quizzes.', enum: ['upcoming', 'past', 'undated', 'all'] },
-        include_submission: { type: 'BOOLEAN', description: 'kind="assignments"/"quizzes": include your submission status, score and grade per row.' },
-        limit: { type: 'INTEGER', description: 'Max rows (default 25, max 100).' },
+        kind: { type: 'string', description: 'What to list', enum: ['courses', 'modules', 'items', 'assignments', 'quizzes', 'files', 'pages'] },
+        course_id: { type: 'string', description: 'Course id (from the course list). Required for everything except kind="courses".' },
+        search: { type: 'string', description: 'Case-insensitive substring of the name/title. Pass whenever the user named a topic, week or number.' },
+        module_id: { type: 'string', description: 'kind="items" only: restrict to one module.' },
+        bucket: { type: 'string', description: 'kind="assignments"/"quizzes": due-date filter. Default "upcoming" for assignments, "all" for quizzes.', enum: ['upcoming', 'past', 'undated', 'all'] },
+        include_submission: { type: 'boolean', description: 'kind="assignments"/"quizzes": include your submission status, score and grade per row.' },
+        limit: { type: 'integer', description: 'Max rows (default 25, max 100).' },
         refresh: REFRESH_PARAM,
       },
       required: ['kind'],
@@ -91,10 +77,10 @@ export const TOOL_CONFIG: ToolConfig[] = [
     name: 'get_assignment',
     description: 'One assignment in full: description, due date, points, submission types, and your submission status, score and grade.',
     parameters: {
-      type: 'OBJECT',
+      type: 'object',
       properties: {
-        course_id: { type: 'STRING', description: 'Course id' },
-        assignment_id: { type: 'STRING', description: 'Assignment id' },
+        course_id: { type: 'string', description: 'Course id' },
+        assignment_id: { type: 'string', description: 'Assignment id' },
         refresh: REFRESH_PARAM,
       },
       required: ['course_id', 'assignment_id'],
@@ -103,15 +89,15 @@ export const TOOL_CONFIG: ToolConfig[] = [
   {
     name: 'search_documents',
     description:
-      'Find the passages that answer a question inside a document: files (PDF/PPTX), pages, assignment descriptions, the syllabus (course policies, grading scheme, office hours: document_type="syllabus", document_id=course id), discussion threads, inbox threads. Returns excerpts with document name and page/slide to cite. Pass document_type + document_id to search one document (ids come from list_content, get_discussions, get_inbox, or a [file …]/[page …]/[assignment …] marker in text you have read); without them, everything already read is searched.',
+      'Find the passages that answer a question inside a document: files (PDF, PPTX, DOCX, and any text file such as code, Markdown or CSV), pages, assignment descriptions, the syllabus (course policies, grading scheme, office hours: document_type="syllabus", document_id=course id), discussion threads, inbox threads. Returns excerpts with document name and the page, slide or section to cite (unit says which). Pass document_type + document_id to search one document (ids come from list_content, get_discussions, get_inbox, or a [file …]/[page …]/[assignment …] marker in text you have read); without them, everything already read is searched.',
     parameters: {
-      type: 'OBJECT',
+      type: 'object',
       properties: {
-        query: { type: 'STRING', description: 'Specific question or key phrase. Include distinctive terms (theorem names, question numbers, concepts).' },
-        course_id: { type: 'STRING', description: 'Restrict to one course. Pass whenever the course is known.' },
-        document_type: { type: 'STRING', description: 'With document_id: which kind of document', enum: ['file', 'page', 'assignment', 'syllabus', 'discussion', 'conversation'] },
-        document_id: { type: 'STRING', description: 'The content_ref of a File/Page item, a file id, a page slug, an assignment id, a discussion id, a conversation id, or the course id for the syllabus.' },
-        limit: { type: 'INTEGER', description: 'Max excerpts (default 5, max 15)' },
+        query: { type: 'string', description: 'Specific question or key phrase. Include distinctive terms (theorem names, question numbers, concepts).' },
+        course_id: { type: 'string', description: 'Restrict to one course. Pass whenever the course is known.' },
+        document_type: { type: 'string', description: 'With document_id: which kind of document', enum: ['file', 'page', 'assignment', 'syllabus', 'discussion', 'conversation'] },
+        document_id: { type: 'string', description: 'The content_ref of a File/Page item, a file id, a page slug, an assignment id, a discussion id, a conversation id, or the course id for the syllabus.' },
+        limit: { type: 'integer', description: 'Max excerpts (default 5, max 15)' },
       },
       required: ['query'],
     },
@@ -119,14 +105,14 @@ export const TOOL_CONFIG: ToolConfig[] = [
   {
     name: 'read_document',
     description:
-      'The text of a document (see search_documents for the kinds) or of a whole discussion or inbox thread, optionally a page/slide range like "3-5". For when the user wants the content itself; to find where something is said, use search_documents. Text keeps links as markers — [file 123], [page slug], [assignment 45], <https://…> — which are document ids you can follow.',
+      'The text of a document (see search_documents for the kinds) or of a whole discussion or inbox thread, optionally a page/slide/section range like "3-5" (the response\'s unit says which the document has). For when the user wants the content itself; to find where something is said, use search_documents. Text keeps links as markers — [file 123], [page slug], [assignment 45], <https://…> — which are document ids you can follow.',
     parameters: {
-      type: 'OBJECT',
+      type: 'object',
       properties: {
-        document_type: { type: 'STRING', description: 'Kind of document', enum: ['file', 'page', 'assignment', 'syllabus', 'discussion', 'conversation'] },
-        document_id: { type: 'STRING', description: 'File id / content_ref, page slug, assignment id, discussion id, conversation id, or the course id for the syllabus' },
-        course_id: { type: 'STRING', description: 'Course id (required for pages, assignments, discussions and the syllabus; recommended for files)' },
-        pages: { type: 'STRING', description: 'Page/slide range, e.g. "3" or "3-5". Omit for the beginning of the document.' },
+        document_type: { type: 'string', description: 'Kind of document', enum: ['file', 'page', 'assignment', 'syllabus', 'discussion', 'conversation'] },
+        document_id: { type: 'string', description: 'File id / content_ref, page slug, assignment id, discussion id, conversation id, or the course id for the syllabus' },
+        course_id: { type: 'string', description: 'Course id (required for pages, assignments, discussions and the syllabus; recommended for files)' },
+        pages: { type: 'string', description: 'Page/slide/section range, e.g. "3" or "3-5". Omit for the beginning of the document.' },
       },
       required: ['document_type', 'document_id'],
     },
@@ -135,10 +121,10 @@ export const TOOL_CONFIG: ToolConfig[] = [
     name: 'get_announcements',
     description: 'A course\'s announcements, newest first, with their text.',
     parameters: {
-      type: 'OBJECT',
+      type: 'object',
       properties: {
-        course_id: { type: 'STRING', description: 'Course id' },
-        limit: { type: 'INTEGER', description: 'Default 10, max 50' },
+        course_id: { type: 'string', description: 'Course id' },
+        limit: { type: 'integer', description: 'Default 10, max 50' },
         refresh: REFRESH_PARAM,
       },
       required: ['course_id'],
@@ -149,11 +135,11 @@ export const TOOL_CONFIG: ToolConfig[] = [
     description:
       'A course\'s forum: discussion topics by recent activity, with topic text and reply count. The replies are a document (document_type="discussion") for search_documents / read_document.',
     parameters: {
-      type: 'OBJECT',
+      type: 'object',
       properties: {
-        course_id: { type: 'STRING', description: 'Course id' },
-        search: { type: 'STRING', description: 'Keywords to find in topic titles or text' },
-        limit: { type: 'INTEGER', description: 'Default 10, max 50' },
+        course_id: { type: 'string', description: 'Course id' },
+        search: { type: 'string', description: 'Keywords to find in topic titles or text' },
+        limit: { type: 'integer', description: 'Default 10, max 50' },
         refresh: REFRESH_PARAM,
       },
       required: ['course_id'],
@@ -164,10 +150,10 @@ export const TOOL_CONFIG: ToolConfig[] = [
     description:
       'What is due across all courses in a date window (default the next 7 days): assignments, quizzes, events and to-dos with submission state. The answer to "what do I have this week / what am I missing".',
     parameters: {
-      type: 'OBJECT',
+      type: 'object',
       properties: {
-        start_date: { type: 'STRING', description: 'ISO date (YYYY-MM-DD). Default today.' },
-        end_date: { type: 'STRING', description: 'ISO date (YYYY-MM-DD). Default start + 7 days.' },
+        start_date: { type: 'string', description: 'ISO date (YYYY-MM-DD). Default today.' },
+        end_date: { type: 'string', description: 'ISO date (YYYY-MM-DD). Default start + 7 days.' },
         refresh: REFRESH_PARAM,
       },
     },
@@ -177,11 +163,11 @@ export const TOOL_CONFIG: ToolConfig[] = [
     description:
       'Inbox conversations (messages with instructors, TAs, classmates), newest first, with a snippet of the last message. A thread is a document (document_type="conversation") for search_documents / read_document.',
     parameters: {
-      type: 'OBJECT',
+      type: 'object',
       properties: {
-        scope: { type: 'STRING', description: 'Default "all"', enum: ['all', 'unread', 'starred'] },
-        search: { type: 'STRING', description: 'Keywords to find in subjects or message bodies' },
-        limit: { type: 'INTEGER', description: 'Default 10, max 50' },
+        scope: { type: 'string', description: 'Default "all"', enum: ['all', 'unread', 'starred'] },
+        search: { type: 'string', description: 'Keywords to find in subjects or message bodies' },
+        limit: { type: 'integer', description: 'Default 10, max 50' },
         refresh: REFRESH_PARAM,
       },
     },
@@ -216,6 +202,12 @@ function parsePageRange(spec: string | undefined): { from: number; to: number } 
   const from = parseInt(m[1], 10);
   const to = m[2] ? parseInt(m[2], 10) : from;
   return from <= to ? { from, to } : { from: to, to: from };
+}
+
+/** "2026-10-01" → local midnight of that day (a bare ISO date would parse as UTC midnight); anything else as `Date` reads it. */
+function parseDay(value: string): Date {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value.trim());
+  return m ? new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3])) : new Date(value);
 }
 
 const READ_MAX_CHARS = 12000;
@@ -278,7 +270,7 @@ async function ensureDocumentIndexed(
 }
 
 /** Quiz row for the model: minutes and attempts spelled out, description clipped. */
-function shapeQuizRow(z: any) {
+function shapeQuizRow(z: QuizListRow) {
   return {
     id: z.quiz_id,
     title: z.title,
@@ -322,13 +314,9 @@ export const toolFunctions: Record<string, ToolFn> = {
       if (kind === 'modules' || kind === 'items') {
         const r = await ensureCollection('modules', { courseId }, { settings, refresh });
         if (r.status === 'unavailable') return withNotes({ data: [] }, notesFrom([r]));
-        const rows = await exploreGraph({
-          entity_type: kind === 'modules' ? 'modules' : 'module_items',
-          course_id: courseId,
-          module_id: args.module_id,
-          search_term: args.search,
-          limit,
-        });
+        const filter = { course_id: courseId, module_id: args.module_id, search_term: args.search, limit };
+        const rows: Array<ModuleListRow | ModuleItemListRow> =
+          kind === 'modules' ? await exploreGraph({ entity_type: 'modules', ...filter }) : await exploreGraph({ entity_type: 'module_items', ...filter });
         const notes = notesFrom([r]);
         if (rows.length === 0) {
           notes.push(
@@ -383,7 +371,7 @@ export const toolFunctions: Record<string, ToolFn> = {
         // through links in every body the course publishes: home page, syllabus, announcements,
         // discussion topics, quiz descriptions. Assignment descriptions and other pages add links once read.
         const results = await ensureCollections([kind, 'modules', 'home', 'syllabus', 'announcements', 'discussions', 'quizzes'], { courseId }, { settings, refresh });
-        let rows = kind === 'files'
+        let rows: object[] = kind === 'files'
           ? await listCourseFiles(courseId, args.search, limit)
           : await listCoursePages(courseId, args.search, limit);
         if (kind === 'pages' && (!args.search || /syllabus/i.test(args.search)) && (await getCourseSyllabus(courseId))) {
@@ -413,13 +401,14 @@ export const toolFunctions: Record<string, ToolFn> = {
       let row = await getAssignmentRow(assignmentId);
       if (!row) return fail(`Assignment ${assignmentId} not found in course ${courseId}. Use list_content(kind="assignments", search=...) to find the right id.`);
 
-      // Description is fetched lazily and cached while the assignment's updated_at is unchanged
+      // Description is fetched lazily (stored as text, links recorded) and cached while the assignment's updated_at is unchanged
       if (row.description == null || row.description_version !== row.updated_at) {
         await fetchAssignmentWithDescription(courseId, assignmentId);
         row = await getAssignmentRow(assignmentId);
+        if (!row) return fail(`Assignment ${assignmentId} is no longer in course ${courseId}.`);
       }
 
-      const text = await ingestHtml(courseId, 'assignment', assignmentId, row.description);
+      const text: string = row.description || '';
       return withNotes(
         {
           assignment: {
@@ -466,7 +455,12 @@ export const toolFunctions: Record<string, ToolFn> = {
       }
 
       const queryVector = await getEmbedding(args.query, settings, 'query');
-      const results = await searchChunksHybrid(args.query, queryVector, args.course_id, limit, docId);
+      const results = await searchChunksHybrid(args.query, queryVector, {
+        courseId: args.course_id,
+        docId,
+        limit,
+        embeddingModel: resolveEmbeddingModel(settings),
+      });
       if (results.length === 0) {
         notes.push(
           docId
@@ -482,6 +476,7 @@ export const toolFunctions: Record<string, ToolFn> = {
             document_type: r.source_type,
             document_id: r.source_type === 'file' ? r.file_id : r.file_id.replace(/^(page:[^:]+:|assignment:|conversation:|discussion:|syllabus:)/, ''),
             page_or_slide: r.page_number == null ? null : r.page_end != null && r.page_end > r.page_number ? `${r.page_number}-${r.page_end}` : r.page_number,
+            ...(r.page_number != null && r.page_kind ? { unit: r.page_kind } : {}),
             module: r.module_name || null,
             excerpt: r.content,
           })),
@@ -520,12 +515,14 @@ export const toolFunctions: Record<string, ToolFn> = {
       const pageCount = await getDocumentPageCount(doc.docId);
       const chunks = await getFileChunks(doc.docId, range || undefined);
 
+      // PDF pages, PPTX slides, or synthetic sections (DOCX, text files): the label names what is cited
+      const unit: string = chunks[0]?.page_kind || 'page';
       let text = '';
       let truncated = false;
       let lastPage: number | null = null;
       for (const c of chunks) {
         const pageEnd = c.page_end != null ? Number(c.page_end) : null;
-        const label = pageEnd != null && pageEnd > Number(c.page_number) ? `pages ${c.page_number}-${pageEnd}` : `page ${c.page_number}`;
+        const label = pageEnd != null && pageEnd > Number(c.page_number) ? `${unit}s ${c.page_number}-${pageEnd}` : `${unit} ${c.page_number}`;
         const piece = (c.page_number != null && c.page_number !== lastPage ? `\n[${label}]\n` : '\n') + c.content;
         if (text.length + piece.length > READ_MAX_CHARS) {
           truncated = true;
@@ -536,9 +533,9 @@ export const toolFunctions: Record<string, ToolFn> = {
       }
 
       const notes = doc.note ? [doc.note] : [];
-      if (truncated) notes.push(`Output capped at ~${READ_MAX_CHARS} characters (stopped after page ${lastPage}). Request a narrower pages range for the rest.`);
-      if (range && chunks.length === 0) notes.push(`No text on pages ${range.from}-${range.to}${pageCount ? ` (document has ${pageCount} pages/slides)` : ''}.`);
-      return withNotes({ document: doc.title, pages_total: pageCount, pages_returned: range ? `${range.from}-${range.to}` : 'from start', text: text.trim() }, notes);
+      if (truncated) notes.push(`Output capped at ~${READ_MAX_CHARS} characters (stopped after ${unit} ${lastPage}). Request a narrower pages range for the rest.`);
+      if (range && chunks.length === 0) notes.push(`No text on ${unit}s ${range.from}-${range.to}${pageCount ? ` (document has ${pageCount} ${unit}s)` : ''}.`);
+      return withNotes({ document: doc.title, unit, pages_total: pageCount, pages_returned: range ? `${range.from}-${range.to}` : 'from start', text: text.trim() }, notes);
     } catch (e) {
       return fail((e as Error).message);
     }
@@ -601,9 +598,10 @@ export const toolFunctions: Record<string, ToolFn> = {
 
   get_planner: async (args, settings) => {
     try {
-      const today = new Date();
-      const start = args.start_date ? new Date(args.start_date) : new Date(today.toISOString().slice(0, 10));
-      const end = args.end_date ? new Date(args.end_date) : new Date(start.getTime() + 7 * 864e5);
+      // Days are the student's local days, from the start of the first to the end of the last
+      const now = new Date();
+      const start = args.start_date ? parseDay(args.start_date) : new Date(now.getFullYear(), now.getMonth(), now.getDate());
+      const end = args.end_date ? parseDay(args.end_date) : new Date(start.getFullYear(), start.getMonth(), start.getDate() + 7);
       if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) return fail('start_date/end_date must be ISO dates (YYYY-MM-DD)');
       end.setHours(23, 59, 59, 999);
 
@@ -652,7 +650,8 @@ export const toolFunctions: Record<string, ToolFn> = {
   },
 };
 
-function shapePlannerOut(p: Partial<ShapedPlannerItem>) {
+/** A planner item as the tool returns it, from the stored window (`date` a Date) or a live range (`date` a string). */
+function shapePlannerOut(p: ShapedPlannerItem | PlannerListRow) {
   return {
     type: p.plannable_type,
     id: p.plannable_id,

@@ -80,7 +80,7 @@ function ChunkPreview({ chunks }: { chunks: Chunk[] }) {
         <li key={c.chunk_id} className="rounded-lg border border-(--line) bg-(--bg-sunken) px-2.5 py-2">
           <div className="mb-1 text-[10.5px] text-(--ink-mute)">
             chunk {c.chunk_index}
-            {c.page_number != null && <> · page {c.page_end && c.page_end !== c.page_number ? `${c.page_number}–${c.page_end}` : c.page_number}</>}
+            {c.page_number != null && <> · {c.page_kind} {c.page_end && c.page_end !== c.page_number ? `${c.page_number}–${c.page_end}` : c.page_number}</>}
           </div>
           <p className="line-clamp-2 text-[12px] text-(--ink-soft)">{c.content}</p>
         </li>

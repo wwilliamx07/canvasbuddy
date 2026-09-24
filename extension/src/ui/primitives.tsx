@@ -1,6 +1,6 @@
 import { AnimatePresence, motion } from 'motion/react';
-import { Loader2, X, type LucideIcon } from 'lucide-react';
-import type { ReactNode } from 'react';
+import { ChevronRight, Loader2, X, type LucideIcon } from 'lucide-react';
+import { useState, type ReactNode } from 'react';
 import type { PillTone } from './format';
 
 /** Sync/status pill. Maps `syncPill().tone` (and a few ad-hoc tones) to the one-accent palette. */
@@ -141,7 +141,7 @@ export function EmptyState({ icon: Icon, title, hint, action }: { icon: LucideIc
   );
 }
 
-/** The transient result line of a sync/index action, animated in at the bottom of a sheet. */
+/** A transient status line (a forget result, "Settings saved"), animated in at the bottom of a sheet. */
 export function StatusLine({ message }: { message: string | null }) {
   return (
     <div className="pointer-events-none absolute inset-x-0 bottom-0 z-10 flex justify-center px-3 pb-3">
@@ -162,26 +162,35 @@ export function StatusLine({ message }: { message: string | null }) {
   );
 }
 
-export function SavedPill({ show }: { show: boolean }) {
-  return (
-    <AnimatePresence>
-      {show && (
-        <motion.span
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          exit={{ opacity: 0 }}
-          transition={{ duration: 0.15 }}
-          className="rounded-full bg-(--accent-soft) px-2 py-0.5 text-[11px] text-(--accent)"
-        >
-          Saved
-        </motion.span>
-      )}
-    </AnimatePresence>
-  );
-}
-
 export function SectionHeading({ children }: { children: ReactNode }) {
   return <h3 className="serif mb-2 text-[14px] font-medium text-(--ink)">{children}</h3>;
+}
+
+/** A settings section whose body is hidden until its heading is clicked. */
+export function Disclosure({ title, hint, children }: { title: string; hint?: string; children: ReactNode }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <section>
+      <button type="button" aria-expanded={open} onClick={() => setOpen((v) => !v)} className="flex w-full items-baseline gap-1.5 text-left">
+        <ChevronRight size={13} className={`shrink-0 self-center text-(--ink-mute) transition-transform ${open ? 'rotate-90' : ''}`} />
+        <span className="serif text-[14px] font-medium text-(--ink)">{title}</span>
+        {hint && <span className="min-w-0 truncate text-[11px] text-(--ink-mute)">{hint}</span>}
+      </button>
+      <AnimatePresence initial={false}>
+        {open && (
+          <motion.div
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: 'auto', opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            transition={{ duration: 0.18, ease: [0.22, 1, 0.36, 1] }}
+            className="overflow-hidden"
+          >
+            <div className="pt-2">{children}</div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </section>
+  );
 }
 
 export function FieldLabel({ children, hint }: { children: ReactNode; hint?: string }) {
@@ -194,6 +203,50 @@ export function FieldLabel({ children, hint }: { children: ReactNode; hint?: str
 }
 
 /** A plain hairline-underlined text input, per the Settings direction (no boxed inputs). */
+/**
+ * A number field that can be cleared and retyped freely: each keystroke that leaves a valid number
+ * (within min/max, whole when `integer`) is committed, anything else waits, and leaving the field
+ * puts back the last committed value.
+ */
+export function NumberInput({
+  value,
+  onCommit,
+  min,
+  max,
+  integer,
+  onBlur,
+  ...rest
+}: Omit<React.InputHTMLAttributes<HTMLInputElement>, 'type' | 'value' | 'onChange' | 'min' | 'max'> & {
+  value: number;
+  onCommit: (value: number) => void;
+  min?: number;
+  max?: number;
+  integer?: boolean;
+}) {
+  const [draft, setDraft] = useState<string | null>(null); // the text while editing; null shows `value`
+  const valid = (n: number) =>
+    Number.isFinite(n) && (min === undefined || n >= min) && (max === undefined || n <= max) && (!integer || Number.isInteger(n));
+  return (
+    <input
+      {...rest}
+      type="number"
+      min={min}
+      max={max}
+      value={draft ?? String(value)}
+      onChange={(e) => {
+        const text = e.target.value;
+        setDraft(text);
+        const n = text.trim() === '' ? NaN : Number(text);
+        if (valid(n) && n !== value) onCommit(n);
+      }}
+      onBlur={(e) => {
+        setDraft(null);
+        onBlur?.(e);
+      }}
+    />
+  );
+}
+
 export function UnderlineInput(props: React.InputHTMLAttributes<HTMLInputElement>) {
   const { className = '', ...rest } = props;
   return (

@@ -1,30 +1,67 @@
 /**
  * The contract the UI is written against. `App.tsx` builds one `AppModel` from its state and
  * handlers and hands it to `Shell`; nothing under `src/ui` reaches past this object (no direct
- * data access, no Canvas calls). Extend the extension first, then this file.
+ * data access, no Canvas calls). New data reaches the UI by extending this type (and the hook or
+ * `App` code that fills it) first, then the component.
  */
 
 import type { CollectionKind, FreshnessSettings } from '../canvas/freshness';
 import type { AppSettings } from '../settings';
+import type { Usage } from '../providers/types';
+import type { CommandInfo } from '../commands';
+import type { CatalogEntry } from '../connections/catalog';
+import type { ActiveTab } from '../canvas/connection';
+import type { GraphStats } from '../types/canvas';
 
 export type { CollectionKind, FreshnessSettings } from '../canvas/freshness';
 export { DEFAULT_FRESHNESS } from '../canvas/freshness';
 export type { AppSettings } from '../settings';
-export { DEFAULT_BASE_URLS } from '../settings';
+export { DEFAULT_SETTINGS } from '../settings';
+// The provider and model catalogs are static data the Settings sheet renders from
+export type { ProviderId, Usage } from '../providers/types';
+export type { CommandInfo } from '../commands';
+export { PROVIDERS, providerInfo, type ProviderInfo } from '../providers/registry';
+export { isKnown768Embedding, modelInfo } from '../providers/models';
 
 // ---------------------------------------------------------------------------
 // Chat
 // ---------------------------------------------------------------------------
+
+/**
+ * One thing the assistant did while working on an answer: a model thought (Gemini, when the
+ * reasoning setting is on) or a tool call. Persisted with the chat, text fields capped.
+ */
+export interface Step {
+  /** `notice`: a line from the loop itself, e.g. a rate-limit wait. */
+  kind: 'thought' | 'tool' | 'notice';
+  /** Thought: the thought text (Markdown). Tool: one line, e.g. `Listing assignments "CSC263"`. */
+  label: string;
+  /** Tool: the call's arguments as compact JSON. */
+  detail?: string;
+  /** Tool: the first ~300 characters of the result, or the error message. */
+  result?: string;
+  /** `awaiting`: a connection tool that changes something is waiting for the student's approval. */
+  status?: 'running' | 'awaiting' | 'done' | 'error';
+}
+
+/** The answer to an approval request: run it once, run this tool from now on without asking, or don't. */
+export type ApprovalDecision = 'allow' | 'always' | 'deny';
 
 export interface Message {
   id: string;
   role: 'user' | 'assistant';
   content: string;
   timestamp: Date;
-  /** Tokens are still arriving for this bubble (typing dots while empty, caret while text grows). Transient: never persisted. */
+  /** The assistant is still working on this bubble (typing dots while empty, caret while text grows). Transient: never persisted. */
   streaming?: boolean;
-  /** What the assistant did after this text, one short line per tool call, e.g. `Listing assignments "CSC263"`. Persisted. */
-  activity?: string[];
+  /** A user message sent mid-run, waiting in the steering slot until the loop reads it. Transient: never persisted. */
+  queued?: boolean;
+  /** Assistant: thoughts and tool calls of the run that produced this bubble, in order. Persisted. */
+  steps?: Step[];
+  /** Assistant: tokens the provider reported for this turn's model calls (and digests it triggered). Persisted. */
+  usage?: Usage;
+  /** A command's outcome ("Compacted 42 messages …"): shown as a muted line, persisted, never sent to the model. */
+  notice?: boolean;
 }
 
 export interface ChatSummary {
@@ -65,11 +102,8 @@ export type Connection =
   | { status: 'disconnected'; host?: string; reason?: string }
   | { status: 'connected'; host: string; profileName: string; memoryName: string };
 
-export interface TabInspection {
-  /** Host of the active tab, when it is an https page the panel may see. */
-  host: string | null;
-  /** Whether that page is Canvas; null when it could not be inspected. */
-  isCanvas: boolean | null;
+/** The current tab as the Connect screen sees it (`canvas/connection.ts` → `inspectActiveTab`). */
+export interface TabInspection extends ActiveTab {
   /** Profile name when the host is a known deployment ("Quercus"), else null. */
   profileName: string | null;
 }
@@ -90,14 +124,7 @@ export interface ConnectModel {
 // Memory — a view of what the engine has remembered. The user can only forget.
 // ---------------------------------------------------------------------------
 
-export interface GraphStats {
-  courseCount: number;
-  moduleCount: number;
-  itemCount: number;
-  assignmentCount: number;
-  fileCount: number;
-  chunkCount: number;
-}
+export type { GraphStats } from '../types/canvas';
 
 export interface CourseSummary {
   course_id: string;
@@ -204,6 +231,8 @@ export interface Chunk {
   chunk_index: number;
   page_number: number | null;
   page_end: number | null;
+  /** What page_number counts: page, slide or section */
+  page_kind: string;
   content: string;
 }
 
@@ -253,6 +282,67 @@ export interface MemoryModel {
 }
 
 // ---------------------------------------------------------------------------
+// Connections (remote MCP servers the student added)
+// ---------------------------------------------------------------------------
+
+export type { CatalogEntry } from '../connections/catalog';
+
+export interface ConnectionToolView {
+  name: string;
+  title: string;
+  description?: string;
+  /** The server marks it as changing nothing; it runs without asking. */
+  readOnly: boolean;
+  /** The student chose "Always allow" for it. */
+  alwaysAllowed: boolean;
+  /** Switched on: the assistant may search, load and call it. */
+  enabled: boolean;
+  /** Estimated tokens of its definition as sent to the model. */
+  tokens: number;
+}
+
+export interface ConnectionView {
+  id: string;
+  name: string;
+  host: string;
+  enabled: boolean;
+  /** `ok`: tools listed. `needs-auth`: the server wants a sign-in. `error`: see `error`. */
+  status: 'ok' | 'needs-auth' | 'error';
+  error?: string;
+  /** Where the sign-in happens ("auth.example.com") while `needs-auth`. */
+  authHost?: string;
+  signedIn: boolean;
+  tools: ConnectionToolView[];
+  /** Estimated tokens of the definitions of its switched-on tools. */
+  toolTokens: number;
+}
+
+/** The Connections section of Settings. Every action is meant to run from a click: Chrome asks for the server's origin first. */
+export interface ConnectionsModel {
+  list: ConnectionView[];
+  catalog: CatalogEntry[];
+  /**
+   * How connection tools reach the model: `eager` = all declared on every call (small setups),
+   * `lazy` = loaded on demand through a search, `none` = nothing connected and enabled.
+   */
+  toolLoading: 'none' | 'eager' | 'lazy';
+  /** Estimated tokens of every enabled connection tool together, and the size below which they are all sent. */
+  totalToolTokens: number;
+  eagerLimit: number;
+  /** Id of the connection an action is running on, or `'new'` while one is being added. */
+  busy: string | null;
+  error: string | null;
+  add: (url: string, name: string) => void;
+  signIn: (id: string) => void;
+  /** Re-open the session and list the server's tools again. */
+  reconnect: (id: string) => void;
+  setEnabled: (id: string, enabled: boolean) => void;
+  setAlwaysAllow: (id: string, tool: string, allow: boolean) => void;
+  setToolEnabled: (id: string, tool: string, enabled: boolean) => void;
+  remove: (id: string) => void;
+}
+
+// ---------------------------------------------------------------------------
 // The whole thing
 // ---------------------------------------------------------------------------
 
@@ -262,8 +352,26 @@ export interface AppModel {
   currentChatId: string | null;
   messages: Message[];
   isLoading: boolean;
-  sendMessage: (content: string) => void;
+  /**
+   * Idle: starts a run. While a run is in flight: fills the steering slot (replacing a message already
+   * queued there). A `/command` is run instead of sent (see `commands`). Returns null when accepted, or
+   * why not (shown under the composer, the text kept).
+   */
+  sendMessage: (content: string) => string | null;
+  /** Composer commands, for the suggestion list that opens on `/`. */
+  commands: CommandInfo[];
+  /** Takes the queued message back out of the slot and returns its text for the composer; null when nothing is queued. */
+  editQueued: () => string | null;
+  /** Aborts the run and discards the queued message. */
   stop: () => void;
+  /** Answers the tool step that is `awaiting` approval. */
+  respondToApproval: (decision: ApprovalDecision) => void;
+  /**
+   * Set while the run has made `rounds` rounds of tool calls without an answer and waits for the
+   * student: keep going, or end the turn there. A message sent meanwhile also keeps it going.
+   */
+  continuePrompt: { rounds: number } | null;
+  respondToContinue: (keepGoing: boolean) => void;
   newChat: () => void;
   selectChat: (id: string) => void;
   deleteChat: (id: string) => void;
@@ -273,11 +381,21 @@ export interface AppModel {
   updateSettings: (next: AppSettings) => void;
   /** Live estimate of the conversation's token count, shown against `settings.contextThreshold`. */
   currentContextTokens: number;
+  /** "Compact now" next to the meter: runs `/compact`. False when nothing is un-digested or a run is in flight. */
+  canCompact: boolean;
+  compactNow: () => void;
+  /** True when that figure starts from the provider's count of the last call; false when it is all estimate. */
+  contextTokensMeasured: boolean;
+  /** Host access for a local or custom provider (Settings asks for it from a click). */
+  providerAccess: ProviderAccessModel;
 
   // connection
   connection: Connection;
-  /** Banner text ("Not signed in to …; showing what's remembered for …") with a Reload action, or null. */
-  notice: string | null;
+  /**
+   * Banner under the header, or null: a session problem ("Not signed in to …; showing what's
+   * remembered for …") that a Reload fixes (`reload: true`), or a storage failure that it does not.
+   */
+  notice: { text: string; reload: boolean } | null;
   reload: () => void;
   connect: ConnectModel;
   /** "Switch Canvas": drop the host, show the Connect screen (memory is kept). */
@@ -286,6 +404,16 @@ export interface AppModel {
   deleteAccountData: () => void;
 
   memory: MemoryModel;
+  connections: ConnectionsModel;
+}
+
+/** Origins the chosen providers need; empty for hosted providers, which answer CORS themselves. */
+export interface ProviderAccessModel {
+  origins: string[];
+  /** null while checking. */
+  granted: boolean | null;
+  /** Must run from a click. */
+  grant: () => void;
 }
 
 export interface ShellProps {

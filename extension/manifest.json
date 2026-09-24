@@ -23,11 +23,11 @@
     "48": "logo128.png",
     "128": "logo128.png"
   },
-  "permissions": ["sidePanel", "activeTab", "scripting"],
+  "permissions": ["sidePanel", "activeTab", "scripting", "storage", "identity", "declarativeNetRequestWithHostAccess"],
   "host_permissions": [
     "https://*.utoronto.ca/*"
   ],
-  "optional_host_permissions": ["https://*/*"],
+  "optional_host_permissions": ["https://*/*", "http://localhost/*", "http://127.0.0.1/*"],
   "content_security_policy": {
     "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
   }

@@ -65,7 +65,7 @@ export async function verifyCanvasSession(host: string): Promise<ConnectionCheck
   return { ok: true };
 }
 
-export interface TabInspection {
+export interface ActiveTab {
   /** Host of the active tab, when it is an https page whose URL the panel may see. */
   host: string | null;
   /** Whether the page is Canvas; null when the page could not be inspected. */
@@ -80,7 +80,7 @@ export interface TabInspection {
  * open while the user switched tabs) the result is `isCanvas: null` and the caller verifies
  * through the API after the permission request instead.
  */
-export async function inspectActiveTab(): Promise<TabInspection> {
+export async function inspectActiveTab(): Promise<ActiveTab> {
   let tab: chrome.tabs.Tab | undefined;
   try {
     [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -106,7 +106,7 @@ export async function inspectActiveTab(): Promise<TabInspection> {
 
 // Serialized into the page, so it must be self-contained: no references to this module.
 function looksLikeCanvasPage(): boolean {
-  const env = (window as any).ENV;
+  const env = (window as { ENV?: unknown }).ENV;
   const envHit =
     !!env && typeof env === 'object' && ('current_user_id' in env || 'DOMAIN_ROOT_ACCOUNT_ID' in env || 'ACCOUNT_ID' in env);
   const domHit = !!document.querySelector('#application.ic-app, .ic-app-header, .ic-Login, #global_nav_tray_container');

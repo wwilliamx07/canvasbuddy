@@ -10,7 +10,7 @@ export function configureCanvas(host: string): void {
 
 /** The connected Canvas host ("q.utoronto.ca"), or throws when the panel is not connected yet. */
 export function canvasHost(): string {
-  if (!configuredHost) throw new Error('Not connected to Canvas. Connect from the Chat tab first.');
+  if (!configuredHost) throw new Error('Not connected to Canvas. Open your Canvas site and connect from the CanvasBuddy panel first.');
   return configuredHost;
 }
 

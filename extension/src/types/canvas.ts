@@ -128,6 +128,8 @@ export interface RetrievedChunk {
   page_number?: number;
   /** last page/slide covered by the chunk (merged small pages); equals page_number otherwise */
   page_end?: number;
+  /** what page_number counts: 'page' | 'slide' | 'section'; undefined for thread entries */
+  page_kind?: string;
   content: string;
   similarity: number;
   filename: string;

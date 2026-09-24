@@ -1,4 +1,4 @@
-import { getDB, withTransaction } from '../db/pglite';
+import { getDB, q, withTransaction, type Queryable } from '../db/pglite';
 import { clearGraphRows, forgetCollectionRows, forgetCourseRows } from '../db/graph';
 import { isUnavailableError } from './http';
 import type { AppSettings } from '../settings';
@@ -100,7 +100,7 @@ export type ProbeResult =
 export interface SyncOutcome {
   /** Opaque value the next probe compares against (e.g. a module-list fingerprint). */
   fingerprint?: string | null;
-  /** Human-readable, surfaced in tool results and the Graph Explorer. */
+  /** Human-readable, surfaced in tool notes ("modules re-synced from Canvas just now (3 modules, …)"). */
   summary?: string;
 }
 
@@ -201,9 +201,9 @@ async function setSyncState(
   );
 }
 
-/** Forget a scope entirely (e.g. when a course disappears). */
-export async function clearSyncState(scopePrefix: string): Promise<void> {
-  const db = await getDB();
+/** Forget a scope and everything under it (`course:<id>` takes all of that course's collections). */
+export async function clearSyncState(scopePrefix: string, tx?: Queryable): Promise<void> {
+  const db = await q(tx);
   await db.query('DELETE FROM sync_state WHERE scope = $1 OR scope LIKE $2', [scopePrefix, `${scopePrefix}:%`]);
 }
 
@@ -248,7 +248,7 @@ export async function forgetEverything(): Promise<void> {
 const inFlight = new Map<string, Promise<EnsureResult>>();
 
 /**
- * Decision procedure (see plan.md §1b):
+ * Decision procedure (see reference/04-knowledge-graph.md → Freshness):
  *   refresh            → sync
  *   unavailable        → skip until unavailableRetry elapses
  *   probed recently    → fresh (debounce)
@@ -306,7 +306,9 @@ export async function ensureCurrent(
     }
 
     if (!mustSync) {
-      await setSyncState(scope, { probedAt: new Date(now) });
+      // A probe that answered clears an error left by an earlier failed probe or sync: Canvas is
+      // reachable and the stored copy is current, so nothing should say "failed" any more
+      await setSyncState(scope, { probedAt: new Date(now), ...(spec.probe && state ? { error: null } : {}) });
       return { ...base, status: 'fresh', syncedNow: false };
     }
 

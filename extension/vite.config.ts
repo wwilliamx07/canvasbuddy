@@ -1,17 +1,17 @@
-import { defineConfig } from "vite";
+import { defineConfig, type Plugin, type ResolvedConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import webExtension from "vite-plugin-web-extension";
 import fs from 'node:fs';
 import path from 'node:path';
 
-function removeReservedViteChunks() {
+function removeReservedViteChunks(): Plugin {
   let outDir = 'dist';
   return {
     name: 'remove-reserved-vite-chunks',
-    configResolved(config: any) {
+    configResolved(config: ResolvedConfig) {
       outDir = config.build.outDir || 'dist';
     },
-    generateBundle(_options: unknown, bundle: Record<string, { type: string }>) {
+    generateBundle(_options, bundle) {
       for (const fileName of Object.keys(bundle)) {
         if (fileName.startsWith('__vite-browser-external')) {
           delete bundle[fileName];

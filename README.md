@@ -6,6 +6,8 @@ CanvasBuddy is an AI agent for Canvas that lives in your browser's side panel.
 
 It works with any Canvas site. There is no server and no account to create. It uses the Canvas session you are already logged into, and you bring your own Gemini or OpenAI API key. Everything it learns stays in your browser.
 
+It can also use your other tools, like Notion or Google Calendar, through connections you add yourself.
+
 ## What it can do
 
 Ask it things like:
@@ -19,6 +21,8 @@ Ask it things like:
 - Did anyone on the forum ask about question 3 of the problem set?
 - What did my TA say in their last message?
 - Read me pages 4 to 6 of the week 2 notes.
+- Put this week's lecture notes on a new page in my Notion.
+- Add my upcoming deadlines to my calendar.
 
 CanvasBuddy seamlessly navigates, learns, answers, remembers.
 
@@ -34,6 +38,8 @@ A few ideas shape the design of CanvasBuddy.
 
 **A minimal toolset.** Eight tools, each a thin read over the local graph, rather than one tool per Canvas endpoint. Less tools and ambiguity reduces hallucinations while maintaining functionality.
 
+**Bring your own tools.** Anything beyond Canvas comes from connections you add. A connection is only a server address and a sign-in: no code is downloaded, and nothing is built in for any one service. The assistant asks before it changes anything in a connected service, and it never writes to Canvas.
+
 ## Technical overview
 
 **Persistent memory.** A Postgres database compiled to WebAssembly (PGlite, with pgvector) persisted in IndexedDB. It holds thin mirrors of Canvas listings (courses, modules and items, assignments and your submissions, pages, files, announcements, discussions, quizzes, planner, inbox), a link graph between them, document text and vectors, and a sync stamp per collection. Chats and settings live in localStorage.
@@ -48,7 +54,21 @@ A few ideas shape the design of CanvasBuddy.
 
 **Rendering.** Replies are Markdown with LaTeX. Because their text derives from content other people wrote on Canvas, they are sanitised through an allowlist before they reach the page, and math is rendered by KaTeX after sanitising.
 
+**Connections.** A connection is a remote MCP (Model Context Protocol) server. CanvasBuddy speaks MCP over Streamable HTTP, signs in with OAuth (discovery, dynamic client registration and PKCE, in a Chrome sign-in window) and refreshes tokens on its own. A service's tools are offered to the model next to the built-in ones. When additional tool definitions exceed a configurable count/token size, tools are lazily loaded through semantic search by the model rather than dumped (keyword ranking over their names and descriptions). Tools the server does not mark as read-only wait for your approval. Tokens are kept in the extension's own storage, separate from your Canvas data.
+
 The full architecture reference is in [`reference/`](reference/README.md).
+
+## Connections
+
+Open **Settings → Connections** to add one.
+
+- **Notion** connects in one click, then asks you to sign in to Notion.
+- **Google Calendar, Gmail and thousands of other apps** are reachable through an aggregator you have an account with, such as **Zapier** or **Composio**. Create an MCP server in their dashboard, choose which actions to allow, and paste its URL.
+- **Anything else** that offers a remote MCP server (its URL usually ends in `/mcp`) can be added by URL.
+
+Each connection shows its tools. You can switch individual tools off, see how large they are, and choose which ones may run without asking. When the assistant wants to change something in a connected service, the step in the chat shows exactly what it will send, with **Allow**, **Always allow** and **Deny**.
+
+What the assistant sends to a connected service (a search, a page it writes for you) goes to that service under your account there; aggregators like Zapier and Composio also hold your sign-in to the apps behind them.
 
 ## Build and install
 
@@ -62,3 +82,5 @@ npm run build
 2. Open your Canvas site in a tab and sign in.
 3. Click the CanvasBuddy icon in the toolbar. The side panel opens. A known Canvas connects on its own; any other site shows a **Grant access** button once.
 4. Open Settings in the panel and paste your Gemini or OpenAI API key.
+
+**Please note that CanvasBuddy was only tested using gemini models**

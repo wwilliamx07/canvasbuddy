@@ -49,10 +49,12 @@ export function Shell({ model }: ShellProps) {
 
       {model.notice && (
         <div className="flex items-center justify-between gap-2 border-b border-(--line) bg-(--warn-soft) px-3 py-1.5 text-[12px] text-(--warn)">
-          <span className="min-w-0 flex-1">{model.notice}</span>
-          <button type="button" onClick={model.reload} className="shrink-0 rounded-full border border-(--warn) px-2 py-0.5 text-[11px] hover:bg-(--bg)">
-            Reload
-          </button>
+          <span className="min-w-0 flex-1">{model.notice.text}</span>
+          {model.notice.reload && (
+            <button type="button" onClick={model.reload} className="shrink-0 rounded-full border border-(--warn) px-2 py-0.5 text-[11px] hover:bg-(--bg)">
+              Reload
+            </button>
+          )}
         </div>
       )}
 

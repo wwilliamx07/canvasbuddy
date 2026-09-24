@@ -1,5 +1,27 @@
 import { getDB, q, type Queryable } from './pglite';
 import type { CollectionKind } from '../canvas/freshness';
+import type { LinkSource } from '../canvas/links';
+import type {
+  AnnouncementListRow,
+  AssignmentDetailRow,
+  AssignmentListRow,
+  ConversationListRow,
+  CourseFileRow,
+  CourseHierarchy,
+  CourseListRow,
+  CoursePageRow,
+  DiscussionListRow,
+  DiscussionRecord,
+  FileListRow,
+  GraphEdgeRow,
+  MessageRow,
+  ModuleItemListRow,
+  ModuleListRow,
+  PageListRow,
+  PlannerListRow,
+  QuizListRow,
+  TreeNodeRow,
+} from './rows';
 import type {
   CanvasCourse,
   CanvasModule,
@@ -33,11 +55,7 @@ const SCOPE_STATUS_SQL = (collection: string) =>
 
 export type AssignmentBucket = 'upcoming' | 'past' | 'undated' | 'all';
 
-/**
- * Explore local graph nodes with optional filters. Rows are compact and capped by `limit`.
- * Used by the tools (via list_content) and the Graph Explorer.
- */
-export async function exploreGraph(options: {
+export interface ExploreOptions {
   entity_type: 'courses' | 'modules' | 'module_items' | 'assignments' | 'files' | 'pages' | 'full_hierarchy';
   course_id?: string;
   module_id?: string;
@@ -46,14 +64,28 @@ export async function exploreGraph(options: {
   include_items?: boolean;
   bucket?: AssignmentBucket;
   include_submission?: boolean;
-}): Promise<any> {
+}
+
+/**
+ * Local graph nodes of one kind with optional filters. Rows are compact and capped by `limit`.
+ * Used by the tools (via list_content) and the Memory sheet.
+ */
+export function exploreGraph(options: ExploreOptions & { entity_type: 'courses' }): Promise<CourseListRow[]>;
+export function exploreGraph(options: ExploreOptions & { entity_type: 'modules' }): Promise<ModuleListRow[]>;
+export function exploreGraph(options: ExploreOptions & { entity_type: 'module_items' }): Promise<ModuleItemListRow[]>;
+export function exploreGraph(options: ExploreOptions & { entity_type: 'assignments' }): Promise<AssignmentListRow[]>;
+export function exploreGraph(options: ExploreOptions & { entity_type: 'files' }): Promise<FileListRow[]>;
+export function exploreGraph(options: ExploreOptions & { entity_type: 'pages' }): Promise<PageListRow[]>;
+export function exploreGraph(options: ExploreOptions & { entity_type: 'full_hierarchy' }): Promise<CourseHierarchy>;
+export function exploreGraph(options: ExploreOptions): Promise<unknown>;
+export async function exploreGraph(options: ExploreOptions): Promise<unknown> {
   const db = await getDB();
   const { entity_type, course_id, module_id, search_term } = options;
   const limit = clampLimit(options.limit);
 
-  const params: any[] = [];
+  const params: unknown[] = [];
   const conditions: string[] = [];
-  const add = (value: any) => {
+  const add = (value: unknown) => {
     params.push(value);
     return `$${params.length}`;
   };
@@ -201,6 +233,7 @@ const LINKED_FROM_SQL = `
         WHEN cl.from_type = 'assignment' THEN 'assignment: ' || COALESCE(a.name, cl.from_id)
         WHEN cl.from_type = 'announcement' THEN 'announcement: ' || COALESCE(an.title, cl.from_id)
         WHEN cl.from_type = 'discussion' THEN 'discussion: ' || COALESCE(d.title, cl.from_id)
+        WHEN cl.from_type = 'discussion_replies' THEN 'replies to discussion: ' || COALESCE(d.title, cl.from_id)
         WHEN cl.from_type = 'quiz' THEN 'quiz: ' || COALESCE(qz.title, cl.from_id)
         WHEN cl.from_type = 'syllabus' THEN 'syllabus'
         ELSE cl.from_type
@@ -209,7 +242,7 @@ const LINKED_FROM_SQL = `
     LEFT JOIN pages p ON cl.from_type = 'page' AND p.course_id = cl.course_id AND p.page_url = cl.from_id
     LEFT JOIN assignments a ON cl.from_type = 'assignment' AND a.assignment_id = cl.from_id
     LEFT JOIN announcements an ON cl.from_type = 'announcement' AND an.announcement_id = cl.from_id
-    LEFT JOIN discussions d ON cl.from_type = 'discussion' AND d.discussion_id = cl.from_id
+    LEFT JOIN discussions d ON cl.from_type IN ('discussion', 'discussion_replies') AND d.discussion_id = cl.from_id
     LEFT JOIN quizzes qz ON cl.from_type = 'quiz' AND qz.quiz_id = cl.from_id
     WHERE cl.course_id = $1 AND cl.to_type = $3
   ) s GROUP BY s.to_ref`;
@@ -218,9 +251,9 @@ const LINKED_FROM_SQL = `
  * Every file the course is known to have, however it was discovered: the Files area (when
  * visible), module items, and links on the home page / pages / assignments / announcements.
  */
-export async function listCourseFiles(courseId: string, search?: string, limit?: number): Promise<any[]> {
+export async function listCourseFiles(courseId: string, search?: string, limit?: number): Promise<CourseFileRow[]> {
   const db = await getDB();
-  const res = await db.query(
+  const res = await db.query<CourseFileRow>(
     `WITH linked AS (${LINKED_FROM_SQL}),
      known AS (
        SELECT f.file_id, COALESCE(f.display_name, f.filename) AS name, NULLIF(f.filename, COALESCE(f.display_name, f.filename)) AS filename,
@@ -243,9 +276,9 @@ export async function listCourseFiles(courseId: string, search?: string, limit?:
 }
 
 /** Every page the course is known to have (Pages area when visible, module items, links); the front page first. */
-export async function listCoursePages(courseId: string, search?: string, limit?: number): Promise<any[]> {
+export async function listCoursePages(courseId: string, search?: string, limit?: number): Promise<CoursePageRow[]> {
   const db = await getDB();
-  const res = await db.query(
+  const res = await db.query<CoursePageRow>(
     `WITH linked AS (${LINKED_FROM_SQL}),
      known AS (
        SELECT p.page_url, p.title, p.updated_at, p.html_url, p.front_page,
@@ -276,7 +309,7 @@ export async function listCoursePages(courseId: string, search?: string, limit?:
  */
 export async function storeContentLinks(
   courseId: string,
-  fromType: 'page' | 'assignment' | 'announcement' | 'discussion' | 'quiz' | 'syllabus',
+  fromType: LinkSource,
   fromId: string,
   links: ContentLink[],
   tx?: Queryable
@@ -342,12 +375,12 @@ export async function replaceCourseTabs(courseId: string, tabs: CanvasTab[], tx?
 }
 
 /**
- * Modules + items (flat, depth-tagged) and assignments for the Graph Explorer's tree view.
+ * Modules + items (flat, depth-tagged) and assignments for the Memory sheet's tree view.
  */
-export async function getCourseHierarchy(courseId: string, includeItems: boolean = true): Promise<any> {
+export async function getCourseHierarchy(courseId: string, includeItems: boolean = true): Promise<CourseHierarchy> {
   const db = await getDB();
 
-  const courseRes = await db.query('SELECT course_id, name, course_code, term FROM courses WHERE course_id = $1', [courseId]);
+  const courseRes = await db.query<NonNullable<CourseHierarchy['course']>>('SELECT course_id, name, course_code, term FROM courses WHERE course_id = $1', [courseId]);
   const course = courseRes.rows[0] || null;
 
   const treeQuery = `
@@ -384,16 +417,16 @@ export async function getCourseHierarchy(courseId: string, includeItems: boolean
     SELECT * FROM tree ORDER BY parent_module_id, depth, pos;
   `;
 
-  const treeRes = await db.query(treeQuery, [courseId, includeItems]);
+  const treeRes = await db.query<TreeNodeRow>(treeQuery, [courseId, includeItems]);
 
   // Projected: the description HTML is never part of an overview
-  const assignRes = await db.query(
+  const assignRes = await db.query<CourseHierarchy['assignments'][number]>(
     `SELECT assignment_id, course_id, name, due_at, points_possible, html_url, group_name
      FROM assignments WHERE course_id = $1 ORDER BY due_at ASC NULLS LAST`,
     [courseId]
   );
 
-  const edgesRes = await db.query(
+  const edgesRes = await db.query<GraphEdgeRow>(
     `SELECT ge.* FROM graph_edges ge
      JOIN modules m ON m.module_id = ge.to_id AND ge.to_type = 'module'
      WHERE m.course_id = $1`,
@@ -408,9 +441,9 @@ export async function getCourseHierarchy(courseId: string, includeItems: boolean
   };
 }
 
-export async function getAssignmentRow(assignmentId: string): Promise<any | null> {
+export async function getAssignmentRow(assignmentId: string): Promise<AssignmentDetailRow | null> {
   const db = await getDB();
-  const res = await db.query(
+  const res = await db.query<AssignmentDetailRow>(
     `SELECT a.*, s.workflow_state AS submission_state, s.submitted_at, s.graded_at, s.score, s.grade, s.late, s.missing, s.excused,
        COALESCE(f.total_chunks, 0) > 0 AS description_indexed
      FROM assignments a
@@ -422,9 +455,9 @@ export async function getAssignmentRow(assignmentId: string): Promise<any | null
   return res.rows[0] || null;
 }
 
-export async function listAnnouncements(courseId: string, limit: number): Promise<any[]> {
+export async function listAnnouncements(courseId: string, limit: number): Promise<AnnouncementListRow[]> {
   const db = await getDB();
-  const res = await db.query(
+  const res = await db.query<AnnouncementListRow>(
     `SELECT announcement_id, title, posted_at, author, text, html_url
      FROM announcements WHERE course_id = $1 ORDER BY posted_at DESC NULLS LAST LIMIT $2`,
     [String(courseId), clampLimit(limit, 10)]
@@ -432,9 +465,9 @@ export async function listAnnouncements(courseId: string, limit: number): Promis
   return res.rows;
 }
 
-export async function listDiscussions(courseId: string, search: string | undefined, limit: number): Promise<any[]> {
+export async function listDiscussions(courseId: string, search: string | undefined, limit: number): Promise<DiscussionListRow[]> {
   const db = await getDB();
-  const res = await db.query(
+  const res = await db.query<DiscussionListRow>(
     `SELECT d.discussion_id, d.title, d.author, d.posted_at, d.last_reply_at, d.reply_count, d.message, d.html_url,
        d.pinned, d.locked, d.assignment_id, COALESCE(f.total_chunks, 0) > 0 AS replies_read
      FROM discussions d
@@ -447,15 +480,15 @@ export async function listDiscussions(courseId: string, search: string | undefin
   return res.rows;
 }
 
-export async function getDiscussionRow(discussionId: string): Promise<any | null> {
+export async function getDiscussionRow(discussionId: string): Promise<DiscussionRecord | null> {
   const db = await getDB();
-  const res = await db.query('SELECT * FROM discussions WHERE discussion_id = $1', [String(discussionId)]);
+  const res = await db.query<DiscussionRecord>('SELECT * FROM discussions WHERE discussion_id = $1', [String(discussionId)]);
   return res.rows[0] || null;
 }
 
 /** Records which last_reply_at the stored reply entries correspond to. */
-export async function setDiscussionRepliesSynced(discussionId: string, version: string | null): Promise<void> {
-  const db = await getDB();
+export async function setDiscussionRepliesSynced(discussionId: string, version: string | null, tx?: Queryable): Promise<void> {
+  const db = await q(tx);
   await db.query('UPDATE discussions SET replies_synced_for = $2 WHERE discussion_id = $1', [String(discussionId), version]);
 }
 
@@ -467,7 +500,7 @@ export async function listQuizzes(options: {
   bucket?: QuizBucket;
   includeSubmission?: boolean;
   limit?: number;
-}): Promise<any[]> {
+}): Promise<QuizListRow[]> {
   const db = await getDB();
   const conditions = ['qz.course_id = $1', '($2::text IS NULL OR qz.title ILIKE $2)'];
   const bucket = options.bucket || 'all';
@@ -478,7 +511,7 @@ export async function listQuizzes(options: {
     ? ', s.workflow_state AS submission_state, s.submitted_at, s.score, s.grade, s.late, s.missing, s.excused'
     : '';
   const submissionJoin = options.includeSubmission ? 'LEFT JOIN submissions s ON s.assignment_id = qz.assignment_id' : '';
-  const res = await db.query(
+  const res = await db.query<QuizListRow>(
     `SELECT qz.quiz_id, qz.title, qz.quiz_type, qz.time_limit, qz.allowed_attempts, qz.question_count, qz.points_possible,
        qz.due_at, qz.unlock_at, qz.lock_at, qz.published, qz.description, qz.assignment_id, qz.html_url, qz.lock_explanation
        ${submissionCols}
@@ -491,7 +524,7 @@ export async function listQuizzes(options: {
   return res.rows;
 }
 
-/** The Syllabus tab body (raw HTML) and its fingerprint, or null when the course has none. */
+/** The Syllabus tab body (text with link markers) and its fingerprint, or null when the course has none. */
 export async function getCourseSyllabus(courseId: string): Promise<{ body: string; version: string } | null> {
   const db = await getDB();
   const res = await db.query<{ syllabus_body: string | null; syllabus_version: string | null }>(
@@ -503,9 +536,9 @@ export async function getCourseSyllabus(courseId: string): Promise<{ body: strin
   return { body: row.syllabus_body, version: row.syllabus_version || '1' };
 }
 
-export async function listPlannerItems(start: Date, end: Date): Promise<any[]> {
+export async function listPlannerItems(start: Date, end: Date): Promise<PlannerListRow[]> {
   const db = await getDB();
-  const res = await db.query(
+  const res = await db.query<PlannerListRow>(
     `SELECT plannable_type, plannable_id, course_id, context_name, title, date, points,
        submitted, late, missing, graded, new_activity, html_url
      FROM planner_items WHERE date >= $1 AND date <= $2 ORDER BY date ASC`,
@@ -518,10 +551,10 @@ export async function listConversations(options: {
   scope?: 'all' | 'unread' | 'starred';
   search?: string;
   limit?: number;
-}): Promise<any[]> {
+}): Promise<ConversationListRow[]> {
   const db = await getDB();
-  const params: any[] = [];
-  const add = (v: any) => {
+  const params: unknown[] = [];
+  const add = (v: unknown) => {
     params.push(v);
     return `$${params.length}`;
   };
@@ -551,7 +584,7 @@ export async function listConversations(options: {
     ${conditions.length ? 'WHERE ' + conditions.join(' AND ') : ''}
     ORDER BY c.last_message_at DESC NULLS LAST
     LIMIT ${add(clampLimit(options.limit, 10))}`;
-  return (await db.query(sql, params)).rows;
+  return (await db.query<ConversationListRow>(sql, params)).rows;
 }
 
 export async function getConversationSubject(conversationId: string): Promise<string> {
@@ -560,9 +593,9 @@ export async function getConversationSubject(conversationId: string): Promise<st
   return res.rows[0]?.subject || `Conversation ${conversationId}`;
 }
 
-export async function getConversationMessages(conversationId: string): Promise<any[]> {
+export async function getConversationMessages(conversationId: string): Promise<MessageRow[]> {
   const db = await getDB();
-  const res = await db.query(
+  const res = await db.query<MessageRow>(
     `SELECT message_id, author_name, created_at, body FROM messages
      WHERE conversation_id = $1 ORDER BY created_at ASC`,
     [String(conversationId)]
@@ -595,7 +628,7 @@ async function pruneNotIn(
   table: string,
   idColumn: string,
   scopeSql: string,
-  scopeParams: any[],
+  scopeParams: unknown[],
   keepIds: string[]
 ): Promise<number> {
   const base = scopeParams.length;
@@ -630,6 +663,18 @@ export async function upsertCourses(courses: CanvasCourse[], tx?: Queryable): Pr
   }
 
   return courses.length;
+}
+
+/**
+ * Removes the courses that are not in `keepIds` (the complete active roster) with everything
+ * remembered under them, and returns their ids so the caller can drop their sync stamps.
+ */
+export async function pruneCourses(keepIds: string[], tx?: Queryable): Promise<string[]> {
+  const db = await q(tx);
+  const res = await db.query<{ course_id: string }>('SELECT course_id FROM courses WHERE course_id <> ALL($1::text[])', [keepIds.map(String)]);
+  const pruned = res.rows.map((r) => r.course_id);
+  for (const courseId of pruned) await forgetCourseRows(courseId, db);
+  return pruned;
 }
 
 /**
@@ -736,7 +781,8 @@ export async function upsertAndPruneModuleItems(
 }
 
 /**
- * Upserts assignments from a listing that may lack `description`. A stored description is kept
+ * Upserts assignments from a listing that may lack `description`. When present it is already
+ * text with link markers (the caller ran it through `ingestHtml`). A stored description is kept
  * while the upstream `updated_at` is unchanged, otherwise dropped so it is re-fetched on demand.
  */
 export async function upsertAndPruneAssignments(
@@ -806,7 +852,35 @@ export async function upsertAndPruneAssignments(
   return { upserted: assignments.length, pruned };
 }
 
-/** Stores a freshly fetched description for one assignment. */
+/**
+ * What a bare chunk lacks for embedding: the course (code or name) and the first module of that
+ * course that lists the document as an item of `itemType` (`contentRef` = file id, page slug or
+ * assignment id, as module items store it — ids of different types can be equal, and slugs repeat
+ * across courses). No `itemType` (the syllabus) means no module.
+ */
+export async function getDocumentContext(
+  courseId: string | null,
+  contentRef: string,
+  itemType: 'File' | 'Page' | 'Assignment' | null
+): Promise<{ course: string | null; module: string | null }> {
+  const db = await getDB();
+  const course = courseId
+    ? (await db.query<{ name: string; course_code: string | null }>('SELECT name, course_code FROM courses WHERE course_id = $1', [String(courseId)])).rows[0]
+    : undefined;
+  const module = itemType
+    ? (
+        await db.query<{ name: string }>(
+          `SELECT m.name FROM module_items mi JOIN modules m ON m.module_id = mi.module_id
+           WHERE mi.content_ref = $1 AND mi.item_type = $2 AND ($3::text IS NULL OR m.course_id = $3)
+           ORDER BY m.position ASC LIMIT 1`,
+          [String(contentRef), itemType, courseId ? String(courseId) : null]
+        )
+      ).rows[0]
+    : undefined;
+  return { course: course ? course.course_code || course.name : null, module: module?.name ?? null };
+}
+
+/** Stores a freshly fetched description (text with link markers) for one assignment. */
 export async function setAssignmentDescription(
   assignmentId: string,
   description: string | null,
@@ -940,7 +1014,7 @@ export async function upsertAndPruneDiscussions(
       [String(courseId)]
     );
     await db.query(
-      `DELETE FROM content_links WHERE course_id = $1 AND from_type = 'discussion' AND from_id NOT IN (SELECT discussion_id FROM discussions WHERE course_id = $1)`,
+      `DELETE FROM content_links WHERE course_id = $1 AND from_type IN ('discussion', 'discussion_replies') AND from_id NOT IN (SELECT discussion_id FROM discussions WHERE course_id = $1)`,
       [String(courseId)]
     );
   }
@@ -981,7 +1055,7 @@ export async function upsertAndPruneQuizzes(
   return { upserted: rows.length, pruned };
 }
 
-/** Stores the Syllabus tab body; NULL when the course has none. The document is indexed from it on demand. */
+/** Stores the Syllabus tab body as text with link markers; NULL when the course has none. The document is indexed from it on demand. */
 export async function setCourseSyllabus(courseId: string, body: string | null, version: string | null, tx?: Queryable): Promise<void> {
   const db = await q(tx);
   await db.query('UPDATE courses SET syllabus_body = $2, syllabus_version = $3 WHERE course_id = $1', [String(courseId), body, version]);
@@ -1045,7 +1119,7 @@ export async function forgetCollectionRows(kind: CollectionKind, courseId: strin
     case 'discussions':
       await db.query('DELETE FROM discussions WHERE course_id = $1', [c]);
       await db.query(`DELETE FROM files WHERE course_id = $1 AND source_type = 'discussion'`, [c]);
-      await db.query(`DELETE FROM content_links WHERE course_id = $1 AND from_type = 'discussion'`, [c]);
+      await db.query(`DELETE FROM content_links WHERE course_id = $1 AND from_type IN ('discussion', 'discussion_replies')`, [c]);
       return;
     case 'quizzes':
       await db.query('DELETE FROM quizzes WHERE course_id = $1', [c]);

@@ -146,6 +146,38 @@ marked.use({ extensions: mathExtensions });
 
 const MATH_PLACEHOLDER = /<span[^>]*\bdata-math="(\d+)"[^>]*><\/span>/g;
 
+/** `\text{…}` and its relatives: arguments typeset as prose, where `&` can only be a literal. */
+const TEXT_ARGUMENT = /\\(?:text(?:bf|it|rm|sf|tt|up)?|mbox)\s*\{/g;
+
+/**
+ * Escapes characters models copy verbatim from course material into math ("\text{# outcomes}",
+ * "50%"), which KaTeX rejects: a bare `#` (a macro parameter, never meant in a reply) and `%`
+ * (a comment that swallows the rest of the formula) anywhere, and `&` inside text arguments. A bare
+ * `&` elsewhere is left alone — it separates columns in aligned environments.
+ */
+export function repairTex(tex: string): string {
+  const escaped = tex.replace(/(?<!\\)#/g, '\\#').replace(/(?<!\\)%/g, '\\%');
+  let out = '';
+  let from = 0;
+  let match: RegExpExecArray | null;
+  TEXT_ARGUMENT.lastIndex = 0;
+  while ((match = TEXT_ARGUMENT.exec(escaped))) {
+    const start = match.index + match[0].length;
+    let depth = 1;
+    let end = start;
+    for (; end < escaped.length && depth > 0; end++) {
+      if (escaped[end] === '\\') end++; // an escaped character never opens or closes a group
+      else if (escaped[end] === '{') depth++;
+      else if (escaped[end] === '}') depth--;
+    }
+    const inner = escaped.slice(start, depth === 0 ? end - 1 : end);
+    out += escaped.slice(from, start) + inner.replace(/(?<!\\)&/g, '\\&') + (depth === 0 ? '}' : '');
+    from = end;
+    TEXT_ARGUMENT.lastIndex = end;
+  }
+  return out + escaped.slice(from);
+}
+
 export function renderMarkdown(text: string): string {
   pending = [];
   const html = marked.parse(text, { async: false }) as string;
@@ -153,7 +185,7 @@ export function renderMarkdown(text: string): string {
   return sanitized.replace(MATH_PLACEHOLDER, (_match, indexStr: string) => {
     const entry = pending[Number(indexStr)];
     if (!entry) return '';
-    return katex.renderToString(entry.tex, {
+    return katex.renderToString(repairTex(entry.tex), {
       displayMode: entry.display,
       throwOnError: false,
       trust: false,
