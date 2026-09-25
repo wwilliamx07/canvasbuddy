@@ -11,11 +11,20 @@
       "128": "logo128.png"
     }
   },
-  "side_panel": {
+  "{{chrome}}.side_panel": {
     "default_path": "index.html"
   },
+  "{{firefox}}.sidebar_action": {
+    "default_panel": "index.html",
+    "default_title": "CanvasBuddy",
+    "default_icon": "logo128.png",
+    "open_at_install": false
+  },
   "background": {
-    "service_worker": "src/background.ts",
+    "{{chrome}}.service_worker": "src/background.ts",
+    "{{firefox}}.scripts": [
+      "src/background.ts"
+    ],
     "type": "module"
   },
   "icons": {
@@ -23,12 +32,29 @@
     "48": "logo128.png",
     "128": "logo128.png"
   },
-  "permissions": ["sidePanel", "activeTab", "scripting", "storage", "identity", "declarativeNetRequestWithHostAccess"],
+  "permissions": [
+    "{{chrome}}.sidePanel",
+    "activeTab",
+    "scripting",
+    "storage",
+    "identity",
+    "declarativeNetRequestWithHostAccess"
+  ],
   "host_permissions": [
     "https://*.utoronto.ca/*"
   ],
-  "optional_host_permissions": ["https://*/*", "http://localhost/*", "http://127.0.0.1/*"],
+  "optional_host_permissions": [
+    "https://*/*",
+    "http://localhost/*",
+    "http://127.0.0.1/*"
+  ],
   "content_security_policy": {
     "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
+  },
+  "{{firefox}}.browser_specific_settings": {
+    "gecko": {
+      "id": "canvasbuddy@canvasbuddy.extension",
+      "strict_min_version": "128.0"
+    }
   }
 }

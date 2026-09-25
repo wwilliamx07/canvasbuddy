@@ -3,7 +3,7 @@
 
 ## What it is
 
-CanvasBuddy is an AI agent for Canvas that lives in your browser's side panel.
+CanvasBuddy is an AI agent for Canvas that lives in your browser's side panel (the sidebar, in Firefox).
 
 It works with any Canvas site. There is no server and no account to create. It uses the Canvas session you are already logged into, and you bring your own Gemini or OpenAI API key. Everything it learns stays in your browser.
 
@@ -55,7 +55,7 @@ A few ideas shape the design of CanvasBuddy.
 
 **Rendering.** Replies are Markdown with LaTeX. Because their text derives from content other people wrote on Canvas, they are sanitised through an allowlist before they reach the page, and math is rendered by KaTeX after sanitising.
 
-**Connections.** A connection is a remote MCP (Model Context Protocol) server. CanvasBuddy speaks MCP over Streamable HTTP, signs in with OAuth (discovery, dynamic client registration and PKCE, in a Chrome sign-in window) and refreshes tokens on its own. A service's tools are offered to the model next to the built-in ones. When additional tool definitions exceed a configurable count/token size, tools are lazily loaded through semantic search by the model rather than dumped (keyword ranking over their names and descriptions). Tools the server does not mark as read-only wait for your approval. Tokens are kept in the extension's own storage, separate from your Canvas data.
+**Connections.** A connection is a remote MCP (Model Context Protocol) server. CanvasBuddy speaks MCP over Streamable HTTP, signs in with OAuth (discovery, dynamic client registration and PKCE, in a browser sign-in window) and refreshes tokens on its own. A service's tools are offered to the model next to the built-in ones. When additional tool definitions exceed a configurable count/token size, tools are lazily loaded through semantic search by the model rather than dumped (keyword ranking over their names and descriptions). Tools the server does not mark as read-only wait for your approval. Tokens are kept in the extension's own storage, separate from your Canvas data.
 
 The full architecture reference is in [`reference/`](reference/README.md).
 
@@ -73,15 +73,29 @@ What the assistant sends to a connected service (a search, a page it writes for 
 
 ## Build and install
 
+CanvasBuddy builds for Chrome (and other Chromium browsers like Edge) and for Firefox 128 or later, from the same source.
+
 ```bash
 cd extension
 npm install
-npm run build
+npm run build           # Chrome / Edge → extension/dist
+npm run build:firefox   # Firefox       → extension/dist-firefox
 ```
+
+**Chrome / Edge**
 
 1. Open `chrome://extensions`, turn on Developer mode, choose **Load unpacked**, and pick `extension/dist`.
 2. Open your Canvas site in a tab and sign in.
 3. Click the CanvasBuddy icon in the toolbar. The side panel opens. A known Canvas connects on its own; any other site shows a **Grant access** button once.
 4. Open Settings in the panel and paste your Gemini or OpenAI API key.
 
-**Please note that CanvasBuddy was only tested using gemini models**
+**Firefox**
+
+1. Open `about:debugging`, choose **This Firefox**, then **Load Temporary Add-on…**, and pick `extension/dist-firefox/manifest.json`. A temporary add-on is removed when Firefox closes; load it again next time.
+2. Open your Canvas site in a tab and sign in.
+3. Click the CanvasBuddy icon in the toolbar. CanvasBuddy opens in the sidebar; clicking the icon again closes it. A known Canvas connects on its own; any other site shows a **Grant access** button once.
+4. Open Settings in the panel and paste your Gemini or OpenAI API key.
+
+Firefox lets you withdraw any site access from the add-on's **Permissions** tab in `about:addons`. If you do, CanvasBuddy shows the **Grant access** screen again.
+
+**Please note that CanvasBuddy was only tested using gemini models and the University of Toronto's Quercus**

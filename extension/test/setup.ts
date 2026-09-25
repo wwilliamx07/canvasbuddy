@@ -33,7 +33,12 @@ export const chromeState = {
 };
 
 const chromeStub = {
-  runtime: { id: 'testextensionid', getManifest: () => ({ version: '0.0.0-test' }) },
+  runtime: {
+    id: 'testextensionid',
+    // Firefox's shape: the page host is a per-install UUID, not the id (Chrome uses the id for both).
+    getURL: (path: string) => `moz-extension://test-extension-uuid/${path}`,
+    getManifest: () => ({ version: '0.0.0-test' }),
+  },
   storage: {
     local: {
       async get(key: string) {
@@ -67,10 +72,8 @@ const chromeStub = {
       return true;
     },
   },
+  // No enum objects (`RuleActionType`, `HeaderOperation`): Firefox does not have them.
   declarativeNetRequest: {
-    RuleActionType: { MODIFY_HEADERS: 'modifyHeaders' },
-    HeaderOperation: { REMOVE: 'remove' },
-    ResourceType: { XMLHTTPREQUEST: 'xmlhttprequest' },
     async updateDynamicRules({ removeRuleIds = [], addRules = [] }: chrome.declarativeNetRequest.UpdateRuleOptions) {
       chromeState.dynamicRules = [...chromeState.dynamicRules.filter((r) => !removeRuleIds.includes(r.id)), ...addRules];
     },

@@ -7,7 +7,9 @@ import type { ConnectionRecord } from './store';
  * removes it from this extension's own requests to connection hosts, which is what desktop MCP
  * clients send (no Origin at all). The check guards against a web page driving a local server; it
  * does not apply to an extension calling a remote server with its own token. Page requests are
- * untouched (`initiatorDomains` is this extension only).
+ * untouched (`initiatorDomains` is this extension only: its URL host, which is the id in Chrome and
+ * the per-install UUID of `moz-extension://` in Firefox). The rule is written with string values:
+ * Firefox has no `RuleActionType` / `HeaderOperation` enum objects, and reading one would throw.
  */
 
 const RULE_ID = 1;
@@ -24,13 +26,13 @@ export async function syncOriginRule(connections: ConnectionRecord[]): Promise<v
               id: RULE_ID,
               priority: 1,
               action: {
-                type: chrome.declarativeNetRequest.RuleActionType.MODIFY_HEADERS,
-                requestHeaders: [{ header: 'origin', operation: chrome.declarativeNetRequest.HeaderOperation.REMOVE }],
+                type: 'modifyHeaders',
+                requestHeaders: [{ header: 'origin', operation: 'remove' }],
               },
               condition: {
                 requestDomains: hosts,
-                initiatorDomains: [chrome.runtime.id],
-                resourceTypes: [chrome.declarativeNetRequest.ResourceType.XMLHTTPREQUEST],
+                initiatorDomains: [new URL(chrome.runtime.getURL('')).hostname],
+                resourceTypes: ['xmlhttprequest'],
               },
             },
           ]

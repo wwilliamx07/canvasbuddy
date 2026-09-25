@@ -25,3 +25,6 @@ dist-ssr
 
 dist/
 dist.zip
+dist-firefox/
+dist-firefox.zip
+

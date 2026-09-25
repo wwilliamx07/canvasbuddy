@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
+    "build:firefox": "vite build --mode firefox",
     "lint": "eslint .",
     "preview": "vite preview",
     "test": "vitest run",

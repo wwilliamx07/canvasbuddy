@@ -27,15 +27,24 @@ function removeReservedViteChunks(): Plugin {
   };
 }
 
-export default defineConfig({
-  plugins: [
-    react(),
-    removeReservedViteChunks(),
-    webExtension({
-      manifest: "./manifest.json", // point to wherever your manifest lives
-    }),
-  ],
-  optimizeDeps: {
-    exclude: ["@electric-sql/pglite", "@electric-sql/pglite-pgvector"],
-  },
+// `--mode firefox` builds into dist-firefox; the manifest's `{{chrome}}.` / `{{firefox}}.` keys pick
+// the side panel or the sidebar and the background form each browser accepts.
+export default defineConfig(({ mode }) => {
+  const target = mode === 'firefox' ? 'firefox' : 'chrome';
+  return {
+    build: {
+      outDir: target === 'firefox' ? 'dist-firefox' : 'dist',
+    },
+    plugins: [
+      react(),
+      removeReservedViteChunks(),
+      webExtension({
+        manifest: "./manifest.json", // point to wherever your manifest lives
+        browser: target,
+      }),
+    ],
+    optimizeDeps: {
+      exclude: ["@electric-sql/pglite", "@electric-sql/pglite-pgvector"],
+    },
+  };
 });

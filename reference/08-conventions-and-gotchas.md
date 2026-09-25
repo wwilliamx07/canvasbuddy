@@ -57,7 +57,7 @@ Things that are easy to break because the reason for them is not visible at the 
 
 ## Connections
 
-- **Permission first, from the click.** Every Connections action that reaches a new origin calls `chrome.permissions.request` before any other await (`useConnections`); after a `fetch` Chrome no longer counts the gesture and refuses. A fetch that fails with no status is almost always a missing grant — `describeFailure` says so.
+- **Permission first, from the click.** Every Connections action that reaches a new origin calls `chrome.permissions.request` before any other await (`useConnections`); after a `fetch` the browser no longer counts the gesture and refuses (Firefox is stricter: an `await` of any kind before the request can lose it). A fetch that fails with no status is almost always a missing grant — `describeFailure` says so.
 - **Nothing is installed.** A connection is a URL and a token. Never add a path that downloads and evaluates code (MV3 forbids it, and the CSP would block it anyway), and don't add per-service integrations — a service without an MCP server is reached through an aggregator.
 - **Connection tool args keep their types.** The loop stringifies only built-in tool args; MCP servers validate against their schema and reject `"5"` for an integer.
 - **Connection tools come after the built-in tools** in the request, and the prompt line about them exists only while one is connected, so a student with no connections sends exactly the built-in prefix.
@@ -66,7 +66,7 @@ Things that are easy to break because the reason for them is not visible at the 
 - **Search tuning lives in one table.** Synonyms, stopwords and field weights are in `connections/search.ts`; keep them generic (no service names) and check a change against a real `tools/list` — a rare word in one description easily outranks the right tool.
 - **Server text is untrusted.** Tool descriptions and results come from third parties; they are labelled with the connection's name, the prompt says they are data, and anything not marked read-only needs approval. Don't relax the approval rule to make a demo smoother.
 - **Gemini takes connection schemas as `parametersJsonSchema`.** Its `parameters` field accepts only an OpenAPI subset and would reject or mangle arbitrary JSON Schema.
-- **Keep the Origin rule in sync.** MCP servers may reject `Origin: chrome-extension://…` (Notion does). `syncOriginRule` runs inside `saveConnections`; a new place that contacts a connection-related host must be covered by a stored record first, or its request carries the extension origin.
+- **Keep the Origin rule in sync.** MCP servers may reject `Origin: chrome-extension://…` / `moz-extension://…` (Notion does). `syncOriginRule` runs inside `saveConnections`; a new place that contacts a connection-related host must be covered by a stored record first, or its request carries the extension origin.
 - **Tokens live in `chrome.storage.local`, never in `localStorage`.** Writes go through the serialized `updateConnection`, because a refresh during a tool call and a Settings click can land together.
 
 ## Tests
@@ -83,7 +83,8 @@ Things that are easy to break because the reason for them is not visible at the 
 - **CSP requires `'wasm-unsafe-eval'`** for PGlite. Don't tighten it.
 - **`optimizeDeps.exclude` for PGlite packages** is required; Vite's pre-bundling breaks the WASM loader.
 - **The pdf.js worker is imported with `?url`** so Vite emits it as an asset. Importing it any other way breaks PDF parsing in the packed extension.
-- **`removeReservedViteChunks`** in `vite.config.ts` deletes a `__vite-browser-external` artifact that Chrome rejects as a reserved filename. Keep it unless the upstream plugin stops emitting that chunk.
+- **`removeReservedViteChunks`** in `vite.config.ts` deletes a `__vite-browser-external` artifact that Chrome rejects as a reserved filename (both builds run it). Keep it unless the upstream plugin stops emitting that chunk.
+- **One manifest, two browsers.** Browser-only keys carry a `{{chrome}}.` or `{{firefox}}.` prefix in `manifest.json`; the build keeps the matching ones (full table in `01-overview.md` → Chrome and Firefox). A new permission or manifest key must be valid in both browsers or be prefixed; check both builds' `manifest.json` after changing it. Code uses the `chrome.*` namespace, which Firefox also provides with promises, but write enum values as string literals (`'modifyHeaders'`, not `chrome.declarativeNetRequest.RuleActionType.MODIFY_HEADERS`): Firefox lacks some of Chrome's enum objects, and reading one throws — this silently disabled the Origin rule once; an API only one browser has (`sidePanel`, `sidebarAction`) is feature-checked, as `background.ts` does. Don't use `chrome.runtime.id` as an origin or initiator host — in Firefox the extension's URL host is a per-install UUID, not the id.
 - **`@types/chrome` must be installed** for `tsconfig.app.json` / `tsconfig.test.json` (`types` includes `"chrome"`) to type-check; the test config must stay listed in `tsconfig.json`'s references or the editor checks `test/` without Node and Chrome types; a missing install shows as "Cannot find type definition file for 'chrome'".
 
 ## UI

@@ -138,7 +138,7 @@ describe('managing connections', () => {
     expect(added).toMatchObject({ name: 'test', slug: 'test', status: 'ok' });
     expect(added.tools.map((t) => t.name)).toEqual(['search']);
     const [rule] = chromeState.dynamicRules;
-    expect(rule.condition).toMatchObject({ requestDomains: ['mcp.test'], initiatorDomains: ['testextensionid'] });
+    expect(rule.condition).toMatchObject({ requestDomains: ['mcp.test'], initiatorDomains: ['test-extension-uuid'] });
     expect(rule.action).toMatchObject({ type: 'modifyHeaders', requestHeaders: [{ header: 'origin', operation: 'remove' }] });
     await expect(addConnection(MCP_URL, 'Again')).rejects.toThrow(/already connected/);
   });

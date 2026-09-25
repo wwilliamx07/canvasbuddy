@@ -2,7 +2,7 @@
 
 ## What it is
 
-An AI study assistant for Canvas LMS, packaged as a Chrome/Edge extension that opens in the **side panel**. The user chats with an agent that can read their courses, assignments, planner, announcements, inbox, and course documents, and can search inside PDFs/slides/pages with citations.
+An AI study assistant for Canvas LMS, packaged as a Chrome/Edge extension that opens in the **side panel** (in Firefox, the sidebar). The user chats with an agent that can read their courses, assignments, planner, announcements, inbox, and course documents, and can search inside PDFs/slides/pages with citations.
 
 Design constraints that shape everything:
 
@@ -28,16 +28,35 @@ The constraints above led to a small set of principles that explain most of the 
 
 | Piece | Choice | Notes |
 |---|---|---|
-| Extension format | Manifest V3 | `extension/manifest.json` |
-| Surface | Side panel (`side_panel.default_path = index.html`) | One panel per browser window. The service worker (`src/background.ts`) does nothing except `setPanelBehavior({ openPanelOnActionClick: true })`. |
-| Permissions | `sidePanel`, `activeTab`, `scripting`, `storage`, `identity`, `declarativeNetRequestWithHostAccess`; `host_permissions: https://*.utoronto.ca/*` (the known instances); `optional_host_permissions: https://*/*`, `http://localhost/*`, `http://127.0.0.1/*` (the last two for local model servers) | Known instances need no prompt. Any other Canvas origin is requested at runtime from the Connect screen (`chrome.permissions.request`, a user gesture) and re-checked on every start. `activeTab` lets the panel read the host of the tab the icon was clicked on and, with `scripting`, run a one-line Canvas signature check in that page before asking for its origin. Chats, settings and the graph use localStorage and IndexedDB; `storage` is for connections (`chrome.storage.local`, which holds their tokens), `identity` for their OAuth sign-in window, and `declarativeNetRequestWithHostAccess` for one rule that removes the extension's `Origin` header on requests to connection hosts. Connection origins are requested from a click like Canvas's (`09-connections.md`). |
+| Extension format | Manifest V3, one manifest for Chrome and Firefox | `extension/manifest.json`, with `{{chrome}}.` / `{{firefox}}.` keys per build. See Chrome and Firefox below. |
+| Surface | Side panel in Chrome, sidebar in Firefox; both load `index.html` | One panel per browser window. The background (`src/background.ts`) does nothing except make the toolbar action open it. |
+| Permissions | `sidePanel` (Chrome build only), `activeTab`, `scripting`, `storage`, `identity`, `declarativeNetRequestWithHostAccess`; `host_permissions: https://*.utoronto.ca/*` (the known instances); `optional_host_permissions: https://*/*`, `http://localhost/*`, `http://127.0.0.1/*` (the last two for local model servers) | Known instances need no prompt. Any other Canvas origin is requested at runtime from the Connect screen (`chrome.permissions.request`, a user gesture) and re-checked on every start. `activeTab` lets the panel read the host of the tab the icon was clicked on and, with `scripting`, run a one-line Canvas signature check in that page before asking for its origin. Chats, settings and the graph use localStorage and IndexedDB; `storage` is for connections (`chrome.storage.local`, which holds their tokens), `identity` for their OAuth sign-in window, and `declarativeNetRequestWithHostAccess` for one rule that removes the extension's `Origin` header on requests to connection hosts. Connection origins are requested from a click like Canvas's (`09-connections.md`). |
 | CSP | `script-src 'self' 'wasm-unsafe-eval'` | Required for PGlite's WASM. Inline scripts are blocked. |
 | UI | React 19, TypeScript, Tailwind v4 (`@tailwindcss/postcss`, typography via `@plugin`), `motion` for transitions, `@fontsource-variable/{inter,fraunces}` bundled locally, `lucide-react` icons, `marked` for Markdown, `katex` for math | See `07-ui.md`. |
 | Database | `@electric-sql/pglite` + `@electric-sql/pglite-pgvector`, one database per Canvas identity (`idb://<dbName>` from `canvas/identity.ts`) | Postgres compiled to WASM. See `04-knowledge-graph.md`. |
 | Document parsing | `pdfjs-dist` (worker bundled via `?url` import), `jszip` for PPTX and DOCX | See `05-rag.md`. |
-| Build | Vite 8 + `vite-plugin-web-extension` | `npm run build` → `extension/dist`, load unpacked. A small custom plugin strips a `__vite-browser-external` chunk that Vite emits for Node shims. `optimizeDeps.exclude` keeps PGlite out of pre-bundling. |
+| Build | Vite 8 + `vite-plugin-web-extension` | `npm run build` → `extension/dist` (Chrome/Edge, load unpacked); `npm run build:firefox` → `extension/dist-firefox` (Firefox, temporary add-on). A small custom plugin strips a `__vite-browser-external` chunk that Vite emits for Node shims. `optimizeDeps.exclude` keeps PGlite out of pre-bundling. |
 | TypeScript | Project references: `tsconfig.app.json` (browser, `types: ["vite/client", "chrome"]`), `tsconfig.node.json` (Vite config), `tsconfig.test.json` (`test/`, adds Node types) | Strict, `noUnusedLocals`, `verbatimModuleSyntax`. `npm run lint` (ESLint: typescript-eslint, react-hooks, react-refresh) is clean. |
 | Tests | Vitest + happy-dom (jsdom for the Markdown renderer) | See Tests below. |
+
+## Chrome and Firefox
+
+One source tree and one `manifest.json` build for both browsers. `npm run build` targets Chrome (and Edge) into `extension/dist`; `npm run build:firefox` runs `vite build --mode firefox`, which sets `vite-plugin-web-extension`'s `browser` option to `firefox` and writes `extension/dist-firefox`. In the manifest, a key prefixed `{{chrome}}.` or `{{firefox}}.` is kept (without the prefix) only in that build; unprefixed keys go to both. Everything else — the React app, PGlite, the agent loop, tools, connections, tests — is shared and calls the `chrome.*` namespace, which Firefox also provides with promise-returning APIs — but not every enum object Chrome hangs off it (`declarativeNetRequest.RuleActionType` and `HeaderOperation` are missing), so code writes such values as string literals. The `chrome.*` test stub has only what both provide, with Firefox's shape where they differ (a page URL host that is not the id).
+
+| | Chrome build (`dist`) | Firefox build (`dist-firefox`) |
+|---|---|---|
+| Panel | `side_panel.default_path` | `sidebar_action.default_panel` (`open_at_install: false`) |
+| Background | `background.service_worker` (module) | `background.scripts` (module); Firefox has no extension service workers |
+| Opening the panel | `sidePanel.setPanelBehavior({ openPanelOnActionClick: true })` | `sidebarAction.toggle()` from `action.onClicked` — Firefox opens a sidebar only inside a user action |
+| `sidePanel` permission | yes | omitted (unknown to Firefox) |
+| Add-on id | assigned by Chrome | `browser_specific_settings.gecko.id` (`canvasbuddy@canvasbuddy.extension`); `storage`, `identity` and the OAuth redirect need a fixed id |
+| Minimum version | — | `strict_min_version` 128: `optional_host_permissions` and `scripting.executeScript` with `world: 'MAIN'` |
+| Extension page origin | `chrome-extension://<id>` | `moz-extension://<per-install UUID>` — not the add-on id (see the Origin rule, `09-connections.md`) |
+| OAuth redirect (`identity.getRedirectURL`) | `https://<id>.chromiumapp.org/oauth` | `https://<hash>.extensions.allizom.org/oauth` |
+| Host permissions | manifest ones granted at install; optional ones can be revoked | the user can withdraw any of them, the known instances included, from the add-on's Permissions tab |
+| Install for development | `chrome://extensions` → Developer mode → Load unpacked → `dist` | `about:debugging` → This Firefox → Load Temporary Add-on → `dist-firefox/manifest.json` (removed when Firefox closes) |
+
+Code that needs an API only one browser has feature-checks it (`background.ts`); nothing else branches on the browser. There is no automated run in Firefox. `tmp/firefox-harness/` (git-ignored) loads `dist-firefox` into a headless Firefox over WebDriver BiDi and reports the `Origin` the app's own MCP requests carry; the OAuth window and permission prompts still need trying by hand.
 
 ## Directory layout
 
@@ -47,7 +66,7 @@ canvasbuddy/
 ├── reference/                 ← this folder
 └── extension/
     ├── manifest.json
-    ├── index.html             ← side panel document
+    ├── index.html             ← panel document (Chrome side panel / Firefox sidebar)
     ├── vite.config.ts
     ├── vitest.config.ts       ← tests: happy-dom, setup, no network
     ├── test/                  ← Vitest suites mirroring src/; helpers/ (fake Canvas, LLM, MCP, db, embeddings), fixtures/
@@ -55,7 +74,7 @@ canvasbuddy/
     └── src/
         ├── main.tsx           ← React root
         ├── index.css          ← Tailwind + typography plugin, root sizing, KaTeX overflow, streaming caret
-        ├── background.ts      ← MV3 service worker (side-panel behaviour only)
+        ├── background.ts      ← MV3 background (action opens the side panel / Firefox sidebar)
         ├── App.tsx            ← state owner: connection, settings, chats, the chat on screen; runs the agent through a RunHost; builds the AppModel
         ├── chats.ts           ← Chat / ChatSnapshot, new chat, save a snapshot into a chat (title), read/write localStorage
         ├── providers/
