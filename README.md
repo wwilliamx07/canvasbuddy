@@ -27,6 +27,8 @@ Ask it things like:
 
 CanvasBuddy seamlessly navigates, learns, answers, remembers.
 
+<img src="docs/images/planner-to-calendar.png" width="420" alt="CanvasBuddy listing the week's events and deadlines from Canvas, then adding them to Google Calendar through a connection">
+
 ## Design philosophy
 
 A few ideas shape the design of CanvasBuddy.
