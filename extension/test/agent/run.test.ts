@@ -72,8 +72,9 @@ describe('runAgent', () => {
     expect(messages[1].usage).toEqual({ input: 100, output: 5 });
     expect(usage).toMatchObject({ answerCalls: 1, answers: { input: 100, output: 5 } });
     expect(measure).toEqual({ input: 100, historyLength: 1, coverage: -1 });
-    // The roster rides on the latest user turn, not the system prompt
+    // The roster and the current time ride on the latest user turn, not the system prompt
     expect(requests[0].body.contents[0].parts[0].text).toMatch(/^The student's courses: CSC263[\s\S]*hi$/);
+    expect(requests[0].body.contents[0].parts[0].text).toMatch(/\nCurrent time: \w+day \d{4}-\d\d-\d\dT\d\d:\d\d:\d\d-0[45]:00 \(America\/Toronto\)[^\n]*\n\n---\n\nhi$/);
     expect(requests[0].body.systemInstruction.parts[0].text).toBe('You help students.');
   });
 

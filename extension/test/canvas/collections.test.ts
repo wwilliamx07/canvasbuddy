@@ -193,7 +193,8 @@ describe('discussions', () => {
     expect(await ensureDiscussionThread('1', '80')).toBe('Read 2 replies of "Questions about A1".');
     const chunks = (await db.query<any>("SELECT chunk_id, content FROM file_chunks WHERE file_id = 'discussion:80' ORDER BY chunk_index")).rows;
     expect(chunks.map((c) => c.chunk_id)).toEqual(['discussion:80:topic', 'discussion:80:entry:1', 'discussion:80:entry:2']);
-    expect(chunks[2].content).toBe('Ben (2026-09-03) replying to Ada: By the test suite. See the rubric [file 560].');
+    // Entry dates are the student's local days (2026-09-03T00:00Z is the 2nd in Toronto)
+    expect(chunks[2].content).toBe('Ben (2026-09-02) replying to Ada: By the test suite. See the rubric [file 560].');
     // A file linked only from a reply becomes a known file of the course, and says where it was linked
     const files = await listCourseFiles('1', 'rubric');
     expect(files).toMatchObject([{ file_id: '560', linked_from: 'replies to discussion: Questions about A1' }]);
@@ -215,7 +216,7 @@ describe('inbox', () => {
     // Fetching a thread must not mark it read in Canvas
     expect(canvas.callsTo('/conversations/900')).toEqual(['/conversations/900?auto_mark_as_read=false']);
     const chunks = (await db.query<any>("SELECT content FROM file_chunks WHERE file_id = 'conversation:900' ORDER BY chunk_index")).rows;
-    expect(chunks.map((c) => c.content)).toEqual(['Prof (2026-09-06): Granted.', 'Ada (2026-09-05): Could I have two more days for A1?']);
+    expect(chunks.map((c) => c.content)).toEqual(['Prof (2026-09-05): Granted.', 'Ada (2026-09-04): Could I have two more days for A1?']);
 
     await ensure('inbox', undefined, true);
     expect(canvas.callsTo('/conversations/900')).toHaveLength(1);

@@ -11,6 +11,7 @@ import {
 } from './freshness';
 import { canvasGet, fetchAllPages, CanvasHttpError } from './http';
 import { withTransaction, type Queryable } from '../db/pglite';
+import { localDayOf } from '../utils/time';
 import {
   upsertCourses,
   pruneCourses,
@@ -569,7 +570,7 @@ const inbox: CollectionSpec = {
           chunks: messages.map((m, i) => ({
             chunkId: `${docId}:msg:${m.message_id}`,
             chunkIndex: i,
-            content: `${m.author_name || 'Unknown'} (${(m.created_at || '').slice(0, 10)}): ${m.body}`,
+            content: `${m.author_name || 'Unknown'} (${localDayOf(m.created_at)}): ${m.body}`,
             embedding: null,
           })),
         }, tx);
@@ -721,18 +722,17 @@ export async function ensureDiscussionThread(courseId: string, discussionId: str
   }
 
   const docId = docIdFor('discussion', discussionId);
-  const topicDate = (topic.posted_at ? new Date(topic.posted_at).toISOString() : '').slice(0, 10);
   const chunks = [
     {
       chunkId: `${docId}:topic`,
       chunkIndex: 0,
-      content: `[topic] ${topic.author || 'Unknown'} (${topicDate}): ${topic.title}\n${topic.message || ''}`.trim(),
+      content: `[topic] ${topic.author || 'Unknown'} (${localDayOf(topic.posted_at)}): ${topic.title}\n${topic.message || ''}`.trim(),
       embedding: null,
     },
     ...entries.map((e, i) => ({
       chunkId: `${docId}:entry:${e.id}`,
       chunkIndex: i + 1,
-      content: `${e.author} (${e.createdAt.slice(0, 10)})${e.parentAuthor ? ` replying to ${e.parentAuthor}` : ''}: ${e.text}`,
+      content: `${e.author} (${localDayOf(e.createdAt)})${e.parentAuthor ? ` replying to ${e.parentAuthor}` : ''}: ${e.text}`,
       embedding: null,
     })),
   ];

@@ -10,6 +10,7 @@ import {
   embedDiscussionIfNeeded,
 } from '../canvas/collections';
 import { describeEnsure, type EnsureResult } from '../canvas/freshness';
+import { localTimes } from '../utils/time';
 import { indexDocumentJustInTime, fetchAssignmentWithDescription } from '../canvas/sync';
 import {
   exploreGraph,
@@ -178,7 +179,7 @@ export const TOOL_CONFIG: ToolSpec[] = [
 // helpers
 // ---------------------------------------------------------------------------
 
-const ok = (payload: unknown) => JSON.stringify(payload);
+const ok = (payload: unknown) => JSON.stringify(payload, localTimes);
 const fail = (message: string) => JSON.stringify({ error: message });
 const bool = (v: string | undefined) => v === 'true' || v === '1';
 const int = (v: string | undefined, fallback: number, max: number) => {
@@ -610,11 +611,11 @@ export const toolFunctions: Record<string, ToolFn> = {
       if (!insideWindow) {
         // Outside the cached rolling window: fetch live for exactly this range, do not store
         const rows = await fetchPlannerRange(start, end);
-        return ok({ range: { start: start.toISOString(), end: end.toISOString() }, data: rows.map(shapePlannerOut) });
+        return ok({ range: { start, end }, data: rows.map(shapePlannerOut) });
       }
       const r = await ensureCollection('planner', {}, { settings, refresh: bool(args.refresh) });
       const rows = await listPlannerItems(start, end);
-      return withNotes({ range: { start: start.toISOString(), end: end.toISOString() }, data: rows.map(shapePlannerOut) }, notesFrom([r]));
+      return withNotes({ range: { start, end }, data: rows.map(shapePlannerOut) }, notesFrom([r]));
     } catch (e) {
       return fail((e as Error).message);
     }

@@ -19,7 +19,7 @@ The constraints above led to a small set of principles that explain most of the 
 - **A minimal, graph-backed toolset.** Eight Canvas tools, each a thin read over the local graph with one shape of output, rather than one tool per Canvas endpoint. The tool descriptions and the system prompt are a single contract; capability is added by widening a tool's `kind` or adding a collection, not by adding tools. Tools return JSON and never throw, so the model can recover from `{ error }`. Anything beyond Canvas comes from the student's MCP connections, whose tools are declared after the built-ins.
 - **Discovery through links, not listings.** Canvas hides Files and Pages listings from students at UofT but serves every item by id, so the graph is built from what links to what: module items, the course home page, and links inside every HTML body (`content_links`). Link markers (`[file 123]`, `[page slug]`) are part of document text so the model can hop.
 - **Shape at the boundary, store thin mirrors.** Canvas payloads are reduced to the fields the app reads before they enter the database; types are deliberately thin. Ids are strings everywhere. Sync is upsert + prune inside one transaction, only ever with a complete list.
-- **Cacheable prompt prefix.** The system prompt and tool schemas stay the same between turns; anything per-turn (the course roster, digests) rides on messages, and connection tools loaded mid-chat are appended at the end, so provider prompt caching keeps working.
+- **Cacheable prompt prefix.** The system prompt and tool schemas stay the same between turns; anything per-turn (the course roster, the current time, digests) rides on messages, and connection tools loaded mid-chat are appended at the end, so provider prompt caching keeps working.
 - **Compact context.** Tool results are capped when persisted, conversations are digested past a threshold, and shaped rows omit anything the model does not need (no HTML bodies in overviews).
 - **Memory is engine-managed.** The user never syncs, refreshes or indexes by hand; the Memory sheet only shows what the agent has remembered and lets the user forget parts of it (a document's text, a collection, a course, the whole graph). Anything forgotten comes back the next time a tool needs it. Chats are not memory: only "Delete this account's data" (Settings) removes them.
 - **Everything is local and per-identity.** One database and chat list per `<host>/<userId>`; settings are global. No server, no telemetry, the API key never leaves the browser except to the chosen provider.
@@ -152,7 +152,7 @@ canvasbuddy/
 
 ```
  user ──► ui/Chat ──► App.tsx agent loop
-                       ├─ buildApiHistory (system prompt · digests · turns; course roster on latest user turn)
+                       ├─ buildApiHistory (system prompt · digests · turns; course roster + current time on latest user turn)
                        ├─ providers/ callModel ── adapter ────────────►  Gemini / OpenAI / Anthropic / compatible
                        ├─ connections/tools.ts  runConnectionTool ──────────────────►  remote MCP servers
                        └─ agent/tools.ts  toolFunctions[name](args, settings)

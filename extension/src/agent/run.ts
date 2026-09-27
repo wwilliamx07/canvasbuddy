@@ -29,6 +29,7 @@ import {
   toolStepOutcome,
   type ToolResult,
 } from './history';
+import { currentTimeLine } from '../utils/time';
 
 /**
  * One run of the agent: the student's message, then model calls and tool rounds until the answer.
@@ -250,7 +251,8 @@ export async function runAgent(host: RunHost, start: ChatSnapshot, first: Messag
     try {
       await digest();
       save();
-      const courseOverview = await host.courseOverview();
+      // Fixed for the turn: context that changed between its model calls would break the cached prefix
+      const turnContext = [await host.courseOverview(), currentTimeLine(new Date())].filter(Boolean).join('\n\n');
 
       /** Steering: a queued message is read between steps as an ordinary user turn; the answer after it gets its own bubble. */
       const readSteer = (): boolean => {
@@ -293,7 +295,7 @@ export async function runAgent(host: RunHost, start: ChatSnapshot, first: Messag
         const result = await callModel(
           settings,
           {
-            messages: buildApiHistory(history, digests, systemPrompt, courseOverview),
+            messages: buildApiHistory(history, digests, systemPrompt, turnContext),
             // Recomputed per call: a search in the previous step may have loaded tools
             tools: tools.declared(loaded),
             maxOutputTokens: MAX_OUTPUT_TOKENS,

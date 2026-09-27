@@ -9,6 +9,10 @@ import { afterEach, beforeEach, vi } from 'vitest';
  *   helpers/llm.ts, helpers/mcp.ts) and `vi.unstubAllGlobals()` removes the stub afterwards.
  */
 
+// Model-facing times are local (utils/time.ts); one fixed zone, west of UTC, keeps expectations
+// the same on every machine and puts a UTC midnight on the previous local day.
+process.env.TZ = 'America/Toronto';
+
 vi.mock('pdfjs-dist', () => ({
   GlobalWorkerOptions: {},
   getDocument: () => {

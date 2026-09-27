@@ -84,24 +84,24 @@ export function getConversationCoverageIndex(digests: ContextDigest[]): number {
 }
 
 /**
- * Model-facing history: stable prefix (system prompt, digests) → un-digested turns. The course
- * roster changes between turns, so it is attached to the latest user turn rather than the prompt,
- * keeping the prefix cacheable.
+ * Model-facing history: stable prefix (system prompt, digests) → un-digested turns. The turn
+ * context (course roster, current time) changes between turns, so it is attached to the latest
+ * user turn rather than the prompt, keeping the prefix cacheable.
  */
 export function buildApiHistory(
   apiHistory: ConversationMessage[],
   digests: ContextDigest[],
   systemPrompt: string,
-  courseOverview: string | null = null
+  turnContext: string | null = null
 ): ConversationMessage[] {
   const orderedDigests = [...digests].sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
   const coveredUpToIndex = getConversationCoverageIndex(orderedDigests);
   const remaining = apiHistory.slice(coveredUpToIndex + 1).map((m) => ({ ...m }));
 
-  if (courseOverview) {
+  if (turnContext) {
     for (let i = remaining.length - 1; i >= 0; i--) {
       if (remaining[i].role === 'user' && !remaining[i].toolResults) {
-        remaining[i] = { ...remaining[i], content: `${courseOverview}\n\n---\n\n${remaining[i].content}` };
+        remaining[i] = { ...remaining[i], content: `${turnContext}\n\n---\n\n${remaining[i].content}` };
         break;
       }
     }

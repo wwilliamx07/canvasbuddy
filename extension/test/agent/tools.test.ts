@@ -167,7 +167,8 @@ describe('documents', () => {
   it('read_document of a discussion reads the thread without embedding it', async () => {
     const out = await call('read_document', { document_type: 'discussion', document_id: '80', course_id: '1' });
     expect(out.entries).toBe(3);
-    expect(out.text).toContain('Ada (2026-09-02): How is A1 graded?');
+    // Written 2026-09-02T00:00Z: the student's day in Toronto is the 1st
+    expect(out.text).toContain('Ada (2026-09-01): How is A1 graded?');
     expect(embedCalls.texts).toBe(0);
   });
 
@@ -184,8 +185,9 @@ describe('other tools', () => {
     expect((await call('get_discussions', { course_id: '1' })).data[0]).toMatchObject({ title: 'Questions about A1', replies: 2 });
     expect((await call('get_inbox', {})).data[0]).toMatchObject({ subject: 'Extension request', course: 'Algorithms', participants: ['Ada', 'Prof'] });
     const planner = await call('get_planner', { start_date: '2026-10-01', end_date: '2026-10-02' });
-    expect(planner.data[0]).toMatchObject({ title: 'A1', course_id: '1', date: '2026-10-01T23:59:00.000Z', points: 10 });
+    // Canvas's 2026-10-01T23:59:00Z, as the same instant in the student's zone
+    expect(planner.data[0]).toMatchObject({ title: 'A1', course_id: '1', date: '2026-10-01T19:59:00-04:00', points: 10 });
     // Dates are the student's local days (not UTC midnights), from the start of the first to the end of the last
-    expect(planner.range).toEqual({ start: new Date(2026, 9, 1).toISOString(), end: new Date(2026, 9, 2, 23, 59, 59, 999).toISOString() });
+    expect(planner.range).toEqual({ start: '2026-10-01T00:00:00-04:00', end: '2026-10-02T23:59:59-04:00' });
   });
 });
