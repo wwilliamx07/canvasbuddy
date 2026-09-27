@@ -27,7 +27,12 @@ Ask it things like:
 
 CanvasBuddy seamlessly navigates, learns, answers, remembers.
 
-<img src="docs/images/planner-to-calendar.png" width="420" alt="CanvasBuddy listing the week's events and deadlines from Canvas, then adding them to Google Calendar through a connection">
+<p>
+  <img src="docs/images/lecture-summary.png" width="400" alt="CanvasBuddy summarizing lecture 2 of a probability course from the lecture's PDF, with the formulas rendered">
+  <img src="docs/images/planner-to-calendar.png" width="400" alt="CanvasBuddy listing the week's events and deadlines from Canvas, then adding them to Google Calendar through a connection">
+</p>
+
+<img src="docs/images/lecture-summary-to-notion.png" alt="CanvasBuddy in the side panel turning the lecture summary into a Notion page, shown open beside it">
 
 ## Design philosophy
 
