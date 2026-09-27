@@ -9,9 +9,7 @@ It works with any Canvas site. There is no server and no account to create. It u
 
 It can also use your other tools, like Notion or Google Calendar, through connections you add yourself.
 
-<a href="docs/videos/canvasbuddy-demo.mp4"><img src="docs/images/demo-video.jpg" alt="Demo video: CanvasBuddy finding what's due, adding it to a calendar, answering from a lecture's slides with citations, and saving the answer to notes"></a>
-
-*Demo video (54 s): CanvasBuddy's real interface with a made-up course, calendar and notes app.*
+https://github.com/user-attachments/assets/6b6c4e68-5dbc-4533-a4a0-2f4dbf97495e
 
 ## What it can do
 
